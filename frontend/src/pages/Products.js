@@ -5,6 +5,7 @@ import axios from 'axios';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'react-toastify';
+import { applyProductFilters } from '../utils/productUtils';
 import './Products.css';
 
 const Products = () => {
@@ -37,36 +38,11 @@ const Products = () => {
   }, []);
 
   useEffect(() => {
-    let filtered = [...products];
-
-    // Apply search filter
-    if (searchTerm) {
-      filtered = filtered.filter(product =>
-        product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        product.description.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    }
-
-    // Apply category filter
-    if (filterBy === 'featured') {
-      filtered = filtered.filter(product => product.featured);
-    } else if (filterBy === 'in-stock') {
-      filtered = filtered.filter(product => product.stock > 0);
-    }
-
-    // Apply sorting
-    filtered.sort((a, b) => {
-      switch (sortBy) {
-        case 'price-low':
-          return a.price - b.price;
-        case 'price-high':
-          return b.price - a.price;
-        case 'rating':
-          return b.rating - a.rating;
-        case 'name':
-        default:
-          return a.name.localeCompare(b.name);
-      }
+    // Use the utility function to apply all filters and sorting
+    const filtered = applyProductFilters(products, {
+      category: filterBy !== 'all' ? filterBy : null,
+      searchTerm: searchTerm,
+      sortBy: sortBy
     });
 
     setFilteredProducts(filtered);
@@ -140,15 +116,17 @@ const Products = () => {
             </div>
 
             <div className="filter-group">
-              <label className="filter-label">Filter By:</label>
+              <label className="filter-label">Category:</label>
               <select
                 value={filterBy}
                 onChange={(e) => setFilterBy(e.target.value)}
                 className="filter-select"
               >
                 <option value="all">All Products</option>
-                <option value="featured">Featured Only</option>
-                <option value="in-stock">In Stock Only</option>
+                <option value="phones">Phones</option>
+                <option value="laptops">Laptops</option>
+                <option value="monitors">Monitors</option>
+                <option value="accessories">Accessories</option>
               </select>
             </div>
           </div>

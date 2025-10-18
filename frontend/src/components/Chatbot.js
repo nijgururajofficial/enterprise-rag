@@ -6,13 +6,25 @@ import './Chatbot.css';
 
 const API_URL = 'http://localhost:8000';
 
+const CATEGORY_SHORTCUTS = [
+  { key: 'phones', label: 'Phones', prompt: 'Show me the latest phones' },
+  { key: 'laptops', label: 'Laptops', prompt: 'Recommend laptops for work' },
+  { key: 'monitors', label: 'Monitors', prompt: 'Find monitors around $500' },
+  { key: 'accessories', label: 'Accessories', prompt: 'Suggest useful accessories' }
+];
+
+const CATEGORY_LABELS = CATEGORY_SHORTCUTS.reduce((acc, item) => {
+  acc[item.key] = item.label;
+  return acc;
+}, {});
+
 const Chatbot = () => {
   const { token, isAuthenticated } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState([
     {
       id: 1,
-      text: "👋 Hello! I'm your AI shopping assistant. I can help you find the perfect product!\n\nJust tell me what you're looking for, for example:\n• 'I want to buy a phone'\n• 'Show me laptops under $1000'\n• 'Looking for wireless headphones'\n• 'Need a gaming monitor'\n\nWhat can I help you find today?",
+      text: "👋 Hello! I'm your AI shopping assistant. I can help you find the perfect product!\n\nTry asking for:\n• 'Show me the latest phones'\n• 'Recommend laptops for work'\n• 'Find monitors around $500'\n• 'Suggest useful accessories'\n\nNeed a shortcut? Tap a category below to get started!",
       sender: 'bot',
       timestamp: new Date()
     }
@@ -20,7 +32,12 @@ const Chatbot = () => {
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [categoryStats, setCategoryStats] = useState({});
   const messagesEndRef = useRef(null);
+
+  const handleCategoryClick = (prompt) => {
+    handleSendMessage(null, prompt);
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -30,31 +47,35 @@ const Chatbot = () => {
     scrollToBottom();
   }, [messages]);
 
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!inputMessage.trim()) return;
+  const handleSendMessage = async (e, overrideMessage) => {
+    if (e?.preventDefault) {
+      e.preventDefault();
+    }
+
+    const messageText = (overrideMessage ?? inputMessage).trim();
+    if (!messageText) return;
 
     // Check if user is authenticated
     if (!isAuthenticated) {
       const botMessage = {
-        id: messages.length + 1,
+        id: `auth-${Date.now()}`,
         text: "⚠️ Please log in to use the shopping assistant. You can log in from the navigation menu.",
         sender: 'bot',
         timestamp: new Date()
       };
       setMessages(prev => [...prev, botMessage]);
+      setInputMessage('');
       return;
     }
 
     const userMessage = {
-      id: messages.length + 1,
-      text: inputMessage,
+      id: `user-${Date.now()}`,
+      text: messageText,
       sender: 'user',
       timestamp: new Date()
     };
 
     setMessages(prev => [...prev, userMessage]);
-    const messageText = inputMessage;
     setInputMessage('');
     setIsTyping(true);
 
@@ -80,9 +101,20 @@ const Chatbot = () => {
         setSessionId(data.session_id);
       }
 
+      if (data.data?.recommendations?.length) {
+        const counts = {};
+        data.data.recommendations.forEach((product) => {
+          const normalized = CATEGORY_LABELS[product.category] ? product.category : 'accessories';
+          counts[normalized] = (counts[normalized] || 0) + 1;
+        });
+        setCategoryStats(counts);
+      } else {
+        setCategoryStats({});
+      }
+
       // Create bot response with product info if available
       const botMessage = {
-        id: messages.length + 2,
+        id: `bot-${Date.now()}`,
         text: data.message,
         sender: 'bot',
         timestamp: new Date(),
@@ -188,6 +220,21 @@ const Chatbot = () => {
       {/* Chat Window */}
       {isOpen && (
         <div className="chatbot-window">
+          <div className="chatbot-category-strip">
+            {CATEGORY_SHORTCUTS.map((item) => (
+              <button
+                key={item.key}
+                className="category-chip"
+                type="button"
+                onClick={() => handleCategoryClick(item.prompt)}
+              >
+                <span className="category-label">{item.label}</span>
+                {categoryStats[item.key] && (
+                  <span className="category-count">{categoryStats[item.key]}</span>
+                )}
+              </button>
+            ))}
+          </div>
           <div className="chatbot-header">
             <div className="chatbot-header-content">
               <FiMessageCircle size={20} />

@@ -42,10 +42,8 @@ const Home = ({ searchTerm, sortBy, filterBy }) => {
     }
 
     // Apply category filter
-    if (filterBy === 'featured') {
-      filtered = filtered.filter(product => product.featured);
-    } else if (filterBy === 'in-stock') {
-      filtered = filtered.filter(product => product.stock > 0);
+    if (filterBy && filterBy !== 'all') {
+      filtered = filtered.filter(product => product.category === filterBy);
     }
 
     // Apply sorting

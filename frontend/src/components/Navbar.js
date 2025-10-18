@@ -127,15 +127,17 @@ const Navbar = ({ onSearch, onSort, onFilter, searchTerm, sortBy, filterBy }) =>
             </div>
 
             <div className="filter-group">
-              <label className="filter-label">Filter By:</label>
+              <label className="filter-label">Category:</label>
               <select
                 value={filterBy || 'all'}
                 onChange={(e) => onFilter(e.target.value)}
                 className="filter-select"
               >
                 <option value="all">All Products</option>
-                <option value="featured">Featured Only</option>
-                <option value="in-stock">In Stock Only</option>
+                <option value="phones">Phones</option>
+                <option value="laptops">Laptops</option>
+                <option value="monitors">Monitors</option>
+                <option value="accessories">Accessories</option>
               </select>
             </div>
           </div>

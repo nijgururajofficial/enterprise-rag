@@ -3,7 +3,10 @@ import re
 from typing import Dict, Any, Tuple, List, TypedDict, Annotated
 from database import products
 from langgraph.graph import StateGraph, END
-from langchain_google_genai import ChatGoogleGenerativeAI
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+except ImportError:
+    ChatGoogleGenerativeAI = None
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import operator
 
@@ -11,9 +14,13 @@ import operator
 # Set your API key: export GEMINI_API_KEY='your-api-key-here' or set in .env
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-if not GEMINI_API_KEY:
-    print("Warning: GEMINI_API_KEY not set. Using fallback mode.")
+if not GEMINI_API_KEY or ChatGoogleGenerativeAI is None:
+    if not GEMINI_API_KEY:
+        print("Warning: GEMINI_API_KEY not set. Using fallback mode.")
+    if ChatGoogleGenerativeAI is None:
+        print("Warning: langchain_google_genai not installed. Using fallback mode.")
     USE_GEMINI = False
+    llm = None
 else:
     USE_GEMINI = True
     llm = ChatGoogleGenerativeAI(
@@ -104,27 +111,31 @@ def recommendation_node(state: AgentState) -> AgentState:
     message = state["message"]
     
     if USE_GEMINI:
+        # Build product list dynamically from database
+        product_list = []
+        for product_id, product in products.items():
+            category = product['name'].split()[0].lower()  # Extract category from product name
+            product_list.append(f"- {product['name']}: ${product['price']} ({product['description'][:50]}...)")
+        
+        products_text = "\n        ".join(product_list)
+        
         # Use Gemini to analyze query and extract preferences
-        system_prompt = """You are a product recommendation expert for an electronics store.
+        system_prompt = f"""You are a product recommendation expert for an electronics store.
         Analyze the user's query and extract:
-        1. Product category (phone, laptop, headphones, earbuds, speaker, watch, monitor, keyboard)
+        1. Product category (phones, laptops, monitors, accessories)
         2. Budget range (if mentioned)
-        3. Key preferences or features
+        3. Key preferences or features or subcategory details
         
         Available products:
-        - Phone: iPhone 15 Pro ($999)
-        - Laptop: MacBook Pro M3 ($1999)
-        - Headphones: Sony WH-1000XM5 ($349)
-        - Earbuds: AirPods Pro 2nd Gen ($249)
-        - Speaker: HomePod Mini ($99)
-        - Watch: Apple Watch Series 9 ($399)
-        - Monitor: LG UltraGear 4K ($599)
-        - Keyboard: Keychron K2 Mechanical ($89)
+        {products_text}
         
         Return a JSON-like response with:
         category: <detected category>
         min_budget: <number or 0>
         max_budget: <number or 10000>
+        
+        IMPORTANT: Normalize the category to exactly one of the values: phones, laptops, monitors, accessories.
+        If the query spans multiple categories, choose the single best match.
         """
         
         try:
@@ -536,42 +547,31 @@ def get_product_recommendations_fallback(user_query: str) -> List[Dict[str, Any]
     
     matched_category = None
     
-    if any(word in user_query_lower for word in ["headphone", "headset"]):
-        matched_category = "headphones"
-    elif any(word in user_query_lower for word in ["earbud", "airpod", "in-ear"]):
-        matched_category = "earbuds"
-    elif any(word in user_query_lower for word in ["phone", "smartphone", "mobile", "iphone"]):
-        matched_category = "phone"
-    elif any(word in user_query_lower for word in ["laptop", "notebook", "macbook"]):
-        matched_category = "laptop"
-    elif any(word in user_query_lower for word in ["speaker"]):
-        matched_category = "speaker"
-    elif any(word in user_query_lower for word in ["watch", "smartwatch", "fitness tracker"]):
-        matched_category = "watch"
-    elif any(word in user_query_lower for word in ["monitor", "display"]) and "phone" not in user_query_lower:
-        matched_category = "monitor"
-    elif any(word in user_query_lower for word in ["keyboard", "keys"]) and "phone" not in user_query_lower:
-        matched_category = "keyboard"
+    if any(word in user_query_lower for word in ["phone", "smartphone", "mobile", "iphone"]):
+        matched_category = "phones"
+    elif any(word in user_query_lower for word in ["laptop", "notebook", "macbook", "ultrabook"]):
+        matched_category = "laptops"
+    elif any(word in user_query_lower for word in ["monitor", "display", "screen"]):
+        matched_category = "monitors"
+    elif any(word in user_query_lower for word in ["headphone", "headset", "earbud", "airpod", "in-ear", "speaker", "watch", "smartwatch", "fitness tracker", "keyboard", "mouse", "accessory", "charger"]):
+        matched_category = "accessories"
     
     # Map products to categories
     category_map = {
-        "phone": "p5",
-        "laptop": "p7",
-        "headphones": "p1",
-        "earbuds": "p8",
-        "speaker": "p6",
-        "watch": "p2",
-        "monitor": "p3",
-        "keyboard": "p4"
+        "phones": ["p5"],
+        "laptops": ["p7"],
+        "monitors": ["p3"],
+        "accessories": ["p1", "p2", "p4", "p6", "p8"]
     }
     
     if matched_category and matched_category in category_map:
-        product_id = category_map[matched_category]
-        product = products[product_id]
-        if min_budget <= product["price"] <= max_budget:
-            recommendations.append(product)
-        else:
-            recommendations.append(product)  # Include anyway if no budget match
+        product_ids = category_map[matched_category]
+        for product_id in product_ids:
+            product = products[product_id]
+            if min_budget <= product["price"] <= max_budget:
+                recommendations.append(product)
+        if not recommendations:
+            recommendations.extend(products[pid] for pid in product_ids)
     
     if not recommendations:
         recommendations = [p for p in products.values() 
@@ -586,27 +586,71 @@ def get_product_recommendations_fallback(user_query: str) -> List[Dict[str, Any]
 
 def parse_recommendations_from_gemini(gemini_response: str, original_query: str) -> List[Dict[str, Any]]:
     """Parse Gemini's response and match to actual products"""
-    # Extract category from Gemini response
     gemini_lower = gemini_response.lower()
-    
+
+    # Extract structured fields
+    category = None
+    min_budget = 0
+    max_budget = 10000
+
+    category_match = re.search(r"category\s*[:=]\s*([a-zA-Z\s-]+)", gemini_lower)
+    if category_match:
+        raw_category = category_match.group(1).strip()
+        raw_category = re.sub(r"[^a-z\s]", "", raw_category)
+        category_aliases = {
+            "phone": "phones",
+            "phones": "phones",
+            "smartphone": "phones",
+            "smartphones": "phones",
+            "laptop": "laptops",
+            "laptops": "laptops",
+            "notebook": "laptops",
+            "notebooks": "laptops",
+            "monitor": "monitors",
+            "monitors": "monitors",
+            "display": "monitors",
+            "displays": "monitors",
+            "accessory": "accessories",
+            "accessories": "accessories",
+            "peripheral": "accessories",
+            "peripherals": "accessories",
+            "audio": "accessories"
+        }
+        category = category_aliases.get(raw_category, raw_category)
+
+    min_match = re.search(r"min_budget\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", gemini_lower)
+    if min_match:
+        try:
+            min_budget = float(min_match.group(1))
+        except ValueError:
+            pass
+
+    max_match = re.search(r"max_budget\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", gemini_lower)
+    if max_match:
+        try:
+            max_budget = float(max_match.group(1))
+        except ValueError:
+            pass
+
     category_map = {
-        "phone": "p5",
-        "laptop": "p7",
-        "headphones": "p1",
-        "headphone": "p1",
-        "earbuds": "p8",
-        "earbud": "p8",
-        "speaker": "p6",
-        "watch": "p2",
-        "monitor": "p3",
-        "keyboard": "p4"
+        "phones": ["p5"],
+        "laptops": ["p7"],
+        "monitors": ["p3"],
+        "accessories": ["p1", "p2", "p4", "p6", "p8"]
     }
-    
-    for category, product_id in category_map.items():
-        if category in gemini_lower:
-            return [products[product_id]]
-    
-    # Fallback
+
+    if category and category in category_map:
+        matched_products = []
+        for product_id in category_map[category]:
+            product = products[product_id]
+            if min_budget <= product["price"] <= max_budget:
+                matched_products.append(product)
+        if not matched_products:
+            matched_products = [products[pid] for pid in category_map[category]]
+
+        matched_products.sort(key=lambda x: x.get("rating", 0), reverse=True)
+        return matched_products[:3]
+
     return get_product_recommendations_fallback(original_query)
 
 
