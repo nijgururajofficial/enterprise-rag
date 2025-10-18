@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+langchain
+langgraph
+langchain-google-genai
+google-generativeai
+pyjwt
+python-multipart
