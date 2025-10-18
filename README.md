@@ -60,11 +60,8 @@ A full-stack electronics retail application built with FastAPI (backend) and Rea
 │   ├── database.py          # Mock database with sample data
 │   ├── agents.py            # LangGraph + Gemini AI agents
 │   ├── requirements.txt     # Python dependencies
-│   ├── test_recommendation_agent.py  # Agent testing suite
-│   ├── visualize_graph.py   # Graph structure visualization
-│   ├── install.bat/sh       # Quick installation scripts
-│   ├── README.md            # Backend documentation
-│   └── SETUP.md             # Detailed setup guide
+│   ├── .env                 # Environment variables (create this)
+│   └── .gitignore           # Git ignore file
 ├── frontend/
 │   ├── public/
 │   │   └── index.html       # HTML template
@@ -74,36 +71,20 @@ A full-stack electronics retail application built with FastAPI (backend) and Rea
 │   │   ├── pages/           # Page components
 │   │   ├── App.js           # Main App component
 │   │   └── index.js         # React entry point
-│   └── package.json         # Node.js dependencies
+│   ├── package.json         # Node.js dependencies
+│   └── .gitignore           # Git ignore file
 └── README.md                # This file
 ```
 
-## Setup Instructions
+## Quick Start Guide
 
 ### Prerequisites
 - Python 3.8+ 
 - Node.js 14+
-- npm or yarn
-- **Google Gemini API Key** ([Get free key here](https://makersuite.google.com/app/apikey))
+- npm
+- **Google Gemini API Key** (Optional - get free key at [https://makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey))
 
 ### Backend Setup
-
-#### Quick Setup (Recommended)
-
-**Windows:**
-```bash
-cd backend
-install.bat
-```
-
-**Linux/Mac:**
-```bash
-cd backend
-chmod +x install.sh
-./install.sh
-```
-
-#### Manual Setup
 
 1. **Navigate to backend directory**:
    ```bash
@@ -112,12 +93,14 @@ chmod +x install.sh
 
 2. **Create and activate virtual environment**:
    ```bash
+   # Create virtual environment
    python -m venv venv
    
-   # On Windows
+   # Activate it
+   # On Windows:
    venv\Scripts\activate
    
-   # On macOS/Linux
+   # On macOS/Linux:
    source venv/bin/activate
    ```
 
@@ -126,62 +109,49 @@ chmod +x install.sh
    pip install -r requirements.txt
    ```
 
-4. **Set Gemini API Key** (Required for AI features):
+4. **Set up environment variables**:
    
-   **Windows (PowerShell):**
-   ```powershell
-   $env:GOOGLE_API_KEY="your_gemini_api_key_here"
-   ```
-   
-   **Windows (CMD):**
-   ```cmd
-   set GOOGLE_API_KEY=your_gemini_api_key_here
-   ```
-   
-   **Linux/Mac:**
+   Create a `.env` file in the backend directory:
    ```bash
-   export GOOGLE_API_KEY="your_gemini_api_key_here"
+   # backend/.env
+   GEMINI_API_KEY=your_gemini_api_key_here
    ```
    
-   > **Note**: Without API key, the system uses fallback rule-based agents
+   > **Note**: The system works without the API key using fallback rule-based agents, but Gemini provides better AI responses.
 
 5. **Run the FastAPI server**:
    ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   uvicorn main:app --reload
    ```
 
-   The API will be available at `http://localhost:8000`
+   ✅ Backend will be available at: **http://localhost:8000**
    
-   API documentation will be available at `http://localhost:8000/docs`
-
-6. **Test the AI agents** (Optional):
-   ```bash
-   python test_recommendation_agent.py
-   ```
-
-7. **Visualize agent graph** (Optional):
-   ```bash
-   python visualize_graph.py
-   ```
+   📚 API documentation at: **http://localhost:8000/docs**
 
 ### Frontend Setup
 
-1. **Navigate to frontend directory**:
+1. **Open a new terminal** and navigate to frontend directory:
    ```bash
    cd frontend
    ```
 
 2. **Install dependencies**:
    ```bash
-   npm install
+   npm i
    ```
 
-3. **Start the development server**:
+3. **Run the development server**:
    ```bash
    npm start
    ```
 
-   The application will be available at `http://localhost:3000`
+   ✅ Frontend will be available at: **http://localhost:3000**
+
+### Access the Application
+
+1. Open your browser and go to **http://localhost:3000**
+2. The website will automatically interact with the backend API
+3. You're ready to shop! 🛍️
 
 ## Usage
 
