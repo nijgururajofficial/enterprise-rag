@@ -3,7 +3,9 @@ uvicorn
 pydantic
 langchain
 langgraph
-langchain-google-genai
-google-generativeai
 pyjwt
 python-multipart
+sqlalchemy
+langchain-chroma
+langchain-openai
+python-dotenv

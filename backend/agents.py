@@ -3,15 +3,17 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, List, TypedDict, Annotated, Optional
 from langgraph.graph import StateGraph, END
+from database import create_complaint, get_order, get_user_orders, get_product_by_id
 from utils import (
     detect_intent,
     get_product_recommendations,
     generate_response,
+    extract_order_id,
     extract_purchase_info,
     extract_option_number,
+    analyze_fraudulent_transaction_ocr,
     analyze_product_defect_image,
     analyze_damaged_shipping_box_image,
-    analyze_fraudulent_transaction_ocr,
 )
 
 # ============================================
@@ -29,27 +31,22 @@ class AgentState(TypedDict):
     chat_history: Annotated[List, operator.add]
     image_url: Optional[str]
     image_type: Optional[str]
+    user_id: Optional[str]
+    session_id: Optional[str]
 
 # ============================================
-# Agent Nodes
+# Agent Logic Helpers
 # ============================================
 
-def intent_detection_node(state: AgentState) -> AgentState:
-    """Node to detect user intent."""
-    # --- MODIFICATION: Pass chat_history to the intent detection function ---
-    state["intent"] = detect_intent(state["message"], state.get("context", {}), state.get("chat_history", []))
-    return state
-
-def recommendation_node(state: AgentState) -> AgentState:
-    """Node to generate product recommendations."""
+def _handle_recommendation_logic(state: AgentState) -> AgentState:
+    """Helper for recommendation logic."""
     state["recommendations"] = get_product_recommendations(
         state["message"]
     )
     return state
 
-def response_generation_node(state: AgentState) -> AgentState:
-    """Node to generate a response for recommendations or general queries."""
-    # --- MODIFICATION: Pass chat_history to the response generation function ---
+def _handle_response_generation_logic(state: AgentState) -> AgentState:
+    """Helper for generating responses."""
     response_text, data = generate_response(
         state["intent"],
         state["message"],
@@ -61,8 +58,8 @@ def response_generation_node(state: AgentState) -> AgentState:
     state["data"] = data
     return state
 
-def purchase_processing_node(state: AgentState) -> AgentState:
-    """Node to handle purchase decisions."""
+def _handle_purchase_processing(state: AgentState) -> AgentState:
+    """Helper for purchase decision logic."""
     intent = state["intent"]
     context = state.get("context", {})
     response_text, data = "", {}
@@ -93,8 +90,8 @@ def purchase_processing_node(state: AgentState) -> AgentState:
     state["data"] = data
     return state
 
-def purchase_info_node(state: AgentState) -> AgentState:
-    """Node to process collected purchase information."""
+def _handle_purchase_info(state: AgentState) -> AgentState:
+    """Helper for processing purchase information."""
     product = state.get("context", {}).get("recommended_product")
     if not product:
         state["response"] = "I'm sorry, I've lost track of the product. Could you select it again?"
@@ -110,8 +107,15 @@ def purchase_info_node(state: AgentState) -> AgentState:
     else:
         order_id = str(uuid.uuid4())[:8].upper()
         order_details = {
-            "order_id": order_id, "product_name": product["name"], **purchase_info,
-            "order_date": datetime.now().isoformat(), "status": "confirmed"
+            "order_id": order_id,
+            "user_id": state.get("user_id"),
+            "items": {product["id"]: 1},
+            "total_amount": product["price"],
+            "name": purchase_info["name"],
+            "address": purchase_info["address"],
+            "payment": purchase_info["payment"],
+            "order_date": datetime.now().isoformat(),
+            "status": "confirmed"
         }
         state["response"] = (
             f"🎉 Purchase successful! Your order for the **{product['name']}** is confirmed.\n"
@@ -121,132 +125,100 @@ def purchase_info_node(state: AgentState) -> AgentState:
         state["intent"] = "purchase_complete"
     return state
 
-def product_defect_node(state: AgentState) -> AgentState:
-    """Node to handle product defect reports with image analysis."""
-    image_url = state.get("image_url")
+def _handle_order_shipping_status(state: AgentState) -> AgentState:
+    """Helper for order status logic."""
     message = state["message"]
+    user_id = state.get("user_id")
     
-    if not image_url:
-        state["response"] = "I'd be happy to help with your product defect issue. Please upload an image of the defective product so I can analyze it and determine the best resolution (Refund, Replace, or Escalate to a human agent)."
-        state["data"] = {"awaiting_image": True, "issue_type": "product_defect"}
-        return state
+    # Try to extract order ID from message
+    order_id = extract_order_id(message)
     
-    # Analyze the image
-    analysis_result = analyze_product_defect_image(image_url, message)
-    decision = analysis_result.get("decision", "escalate")
-    reason = analysis_result.get("reason", "Unable to determine")
-    severity = analysis_result.get("severity", "unknown")
-    defect_type = analysis_result.get("defect_type", "Unknown defect")
+    response_text = ""
+    data = {}
     
-    # Generate appropriate response based on decision
-    if decision == "refund":
-        state["response"] = (
-            f"I've analyzed the image of your defective product. Based on the {severity} defect ({defect_type}), "
-            f"I've determined that a **refund** is the appropriate action.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"Your refund will be processed within 5-7 business days. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "refund",
-            "issue_type": "product_defect",
-            "analysis": analysis_result,
-            "resolved": True
-        }
-    elif decision == "replace":
-        state["response"] = (
-            f"I've analyzed the image of your defective product. Based on the {severity} defect ({defect_type}), "
-            f"I've determined that a **replacement** is the appropriate action.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"A replacement product will be shipped to you within 2-3 business days. You'll receive a tracking number via email. "
-            f"Please return the defective item using the prepaid return label that will be included. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "replace",
-            "issue_type": "product_defect",
-            "analysis": analysis_result,
-            "resolved": True
-        }
-    else:  # escalate
-        state["response"] = (
-            f"I've reviewed your product defect report. This case requires additional review by our human support team.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"A support agent will contact you within 24 hours to resolve this issue. "
-            f"Your case reference number is: {str(uuid.uuid4())[:8].upper()}. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "escalate",
-            "issue_type": "product_defect",
-            "analysis": analysis_result,
-            "case_id": str(uuid.uuid4())[:8].upper(),
-            "resolved": False
-        }
-    
+    if order_id:
+        order = get_order(order_id)
+        if order:
+            product_name = order.get("product_name")
+            # If product_name is missing, try to resolve from items
+            if not product_name and order.get("items"):
+                try:
+                    # Get the first product ID from the items dict
+                    first_pid = list(order["items"].keys())[0]
+                    product = get_product_by_id(first_pid)
+                    if product:
+                        product_name = product["name"]
+                except Exception:
+                    pass
+            
+            product_name = product_name or "Unknown Product"
+
+            order_date_str = order.get("order_date")
+            formatted_date = "Unknown Date"
+            if order_date_str:
+                try:
+                    formatted_date = datetime.fromisoformat(order_date_str).strftime("%B %d, %Y")
+                except ValueError:
+                    formatted_date = order_date_str
+
+            response_text = (
+                f"I found your order **{order_id}**.\n"
+                f"**Status:** {order['status']}\n"
+                f"**Product:** {product_name}\n"
+                f"**Date:** {formatted_date}\n"
+            )
+            data = {"order": order, "order_found": True}
+        else:
+            response_text = f"I couldn't find an order with ID **{order_id}**. Please check the number and try again."
+            data = {"order_found": False}
+    elif user_id:
+        # If no specific ID, list recent orders for the user
+        orders = get_user_orders(user_id)
+        if orders:
+            # Sort by date desc
+            orders.sort(key=lambda x: x.get('order_date', ''), reverse=True)
+            recent_order = orders[0]
+            
+            product_name = recent_order.get("product_name")
+            if not product_name and recent_order.get("items"):
+                try:
+                    first_pid = list(recent_order["items"].keys())[0]
+                    product = get_product_by_id(first_pid)
+                    if product:
+                        product_name = product["name"]
+                except Exception:
+                    pass
+            product_name = product_name or "Unknown Product"
+
+            order_date_str = recent_order.get("order_date")
+            formatted_date = "Unknown Date"
+            if order_date_str:
+                try:
+                    formatted_date = datetime.fromisoformat(order_date_str).strftime("%B %d, %Y")
+                except ValueError:
+                    formatted_date = order_date_str
+
+            response_text = (
+                f"Here is the status of your most recent order **{recent_order['order_id']}**:\n"
+                f"**Status:** {recent_order['status']}\n"
+                f"**Product:** {product_name}\n"
+                f"**Date:** {formatted_date}\n\n"
+                f"You can ask me about other orders by providing the Order ID."
+            )
+            data = {"recent_order": recent_order, "order_found": True}
+        else:
+            response_text = "I don't see any recent orders for your account. If you have an Order ID, please provide it."
+            data = {"order_found": False}
+    else:
+        response_text = "I can help you check your order status. Please provide your **Order ID**."
+        data = {"awaiting_order_id": True}
+        
+    state["response"] = response_text
+    state["data"] = data
     return state
 
-def damaged_shipping_box_node(state: AgentState) -> AgentState:
-    """Node to handle damaged shipping box reports with image analysis."""
-    image_url = state.get("image_url")
-    message = state["message"]
-    
-    if not image_url:
-        state["response"] = "I'd be happy to help with your damaged shipping box issue. Please upload an image of the damaged box so I can analyze it and determine the best resolution (Refund, Replace, or Escalate to a human agent)."
-        state["data"] = {"awaiting_image": True, "issue_type": "damaged_shipping_box"}
-        return state
-    
-    # Analyze the image
-    analysis_result = analyze_damaged_shipping_box_image(image_url, message)
-    decision = analysis_result.get("decision", "escalate")
-    reason = analysis_result.get("reason", "Unable to determine")
-    box_damage_severity = analysis_result.get("box_damage_severity", "unknown")
-    product_condition = analysis_result.get("product_condition", "unknown")
-    
-    # Generate appropriate response based on decision
-    if decision == "refund":
-        state["response"] = (
-            f"I've analyzed the image of your damaged shipping box. Based on the {box_damage_severity} box damage "
-            f"and the product condition ({product_condition}), I've determined that a **refund** is the appropriate action.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"Your refund will be processed within 5-7 business days. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "refund",
-            "issue_type": "damaged_shipping_box",
-            "analysis": analysis_result,
-            "resolved": True
-        }
-    elif decision == "replace":
-        state["response"] = (
-            f"I've analyzed the image of your damaged shipping box. Based on the {box_damage_severity} box damage "
-            f"and the product condition ({product_condition}), I've determined that a **replacement** is the appropriate action.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"A replacement product will be shipped to you within 2-3 business days. You'll receive a tracking number via email. "
-            f"Please return the damaged item using the prepaid return label that will be included. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "replace",
-            "issue_type": "damaged_shipping_box",
-            "analysis": analysis_result,
-            "resolved": True
-        }
-    else:  # escalate
-        state["response"] = (
-            f"I've reviewed your damaged shipping box report. This case requires additional review by our human support team.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"A support agent will contact you within 24 hours to resolve this issue. "
-            f"Your case reference number is: {str(uuid.uuid4())[:8].upper()}. Is there anything else I can help you with?"
-        )
-        state["data"] = {
-            "action": "escalate",
-            "issue_type": "damaged_shipping_box",
-            "analysis": analysis_result,
-            "case_id": str(uuid.uuid4())[:8].upper(),
-            "resolved": False
-        }
-    
-    return state
-
-def fraudulent_transaction_node(state: AgentState) -> AgentState:
-    """Node to handle fraudulent transaction reports with OCR image analysis."""
+def _handle_fraudulent_transaction(state: AgentState) -> AgentState:
+    """Helper for fraud transaction logic."""
     image_url = state.get("image_url")
     message = state["message"]
     
@@ -265,6 +237,17 @@ def fraudulent_transaction_node(state: AgentState) -> AgentState:
     
     # Generate appropriate response based on decision
     if decision == "refund":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "fraudulent_transaction",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Refund Approved: {reason}"
+        })
         state["response"] = (
             f"I've analyzed the transaction details from your credit card statement. Based on my analysis "
             f"(confidence: {confidence}), I've determined that a **refund** is the appropriate action.\n\n"
@@ -278,9 +261,21 @@ def fraudulent_transaction_node(state: AgentState) -> AgentState:
             "action": "refund",
             "issue_type": "fraudulent_transaction",
             "analysis": analysis_result,
+            "case_id": case_id,
             "resolved": True
         }
     elif decision == "decline":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "fraudulent_transaction",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Decline: {reason}"
+        })
         state["response"] = (
             f"I've analyzed the transaction details from your credit card statement. Based on my analysis "
             f"(confidence: {confidence}), this appears to be a **legitimate transaction**.\n\n"
@@ -293,15 +288,27 @@ def fraudulent_transaction_node(state: AgentState) -> AgentState:
             "action": "decline",
             "issue_type": "fraudulent_transaction",
             "analysis": analysis_result,
+            "case_id": case_id,
             "resolved": True
         }
     else:  # escalate
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "fraudulent_transaction",
+            "description": message,
+            "status": "open",
+            "created_at": datetime.now().isoformat(),
+            "resolution": None
+        })
         state["response"] = (
             f"I've reviewed your fraudulent transaction report. This case requires additional review by our fraud investigation team.\n\n"
             f"**Transaction Amount:** {transaction_amount}\n"
             f"**Reason:** {reason}\n\n"
             f"A fraud specialist will contact you within 24 hours to investigate this matter further. "
-            f"Your case reference number is: {str(uuid.uuid4())[:8].upper()}. "
+            f"Your case reference number is: {case_id}. "
             f"In the meantime, we recommend monitoring your account and contacting your bank if needed. "
             f"Is there anything else I can help you with?"
         )
@@ -309,10 +316,258 @@ def fraudulent_transaction_node(state: AgentState) -> AgentState:
             "action": "escalate",
             "issue_type": "fraudulent_transaction",
             "analysis": analysis_result,
-            "case_id": str(uuid.uuid4())[:8].upper(),
+            "case_id": case_id,
             "resolved": False
         }
     
+    return state
+
+def _handle_product_defect(state: AgentState) -> AgentState:
+    """Helper for product defect logic."""
+    image_url = state.get("image_url")
+    message = state["message"]
+    
+    if not image_url:
+        state["response"] = "I'd be happy to help with your product defect issue. Please upload an image of the defective product so I can analyze it and determine the best resolution (Refund, Replace, or Escalate to a human agent)."
+        state["data"] = {"awaiting_image": True, "issue_type": "product_defect"}
+        return state
+    
+    # Analyze the image
+    analysis_result = analyze_product_defect_image(image_url, message)
+    decision = analysis_result.get("decision", "escalate")
+    reason = analysis_result.get("reason", "Unable to determine")
+    severity = analysis_result.get("severity", "unknown")
+    defect_type = analysis_result.get("defect_type", "Unknown defect")
+    
+    # Generate appropriate response based on decision
+    if decision == "refund":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "product_defect",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Refund Approved: {reason}"
+        })
+        state["response"] = (
+            f"I've analyzed the image of your defective product. Based on the {severity} defect ({defect_type}), "
+            f"I've determined that a **refund** is the appropriate action.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"Your refund will be processed within 5-7 business days. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "refund",
+            "issue_type": "product_defect",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": True
+        }
+    elif decision == "replace":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "product_defect",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Replacement Approved: {reason}"
+        })
+        state["response"] = (
+            f"I've analyzed the image of your defective product. Based on the {severity} defect ({defect_type}), "
+            f"I've determined that a **replacement** is the appropriate action.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"A replacement product will be shipped to you within 2-3 business days. You'll receive a tracking number via email. "
+            f"Please return the defective item using the prepaid return label that will be included. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "replace",
+            "issue_type": "product_defect",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": True
+        }
+    else:  # escalate
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "product_defect",
+            "description": message,
+            "status": "open",
+            "created_at": datetime.now().isoformat(),
+            "resolution": None
+        })
+        state["response"] = (
+            f"I've reviewed your product defect report. This case requires additional review by our human support team.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"A support agent will contact you within 24 hours to resolve this issue. "
+            f"Your case reference number is: {case_id}. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "escalate",
+            "issue_type": "product_defect",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": False
+        }
+    
+    return state
+
+def _handle_damaged_shipping_box(state: AgentState) -> AgentState:
+    """Helper for damaged shipping box logic."""
+    image_url = state.get("image_url")
+    message = state["message"]
+    
+    if not image_url:
+        state["response"] = "I'd be happy to help with your damaged shipping box issue. Please upload an image of the damaged box so I can analyze it and determine the best resolution (Refund, Replace, or Escalate to a human agent)."
+        state["data"] = {"awaiting_image": True, "issue_type": "damaged_shipping_box"}
+        return state
+    
+    # Analyze the image
+    analysis_result = analyze_damaged_shipping_box_image(image_url, message)
+    decision = analysis_result.get("decision", "escalate")
+    reason = analysis_result.get("reason", "Unable to determine")
+    box_damage_severity = analysis_result.get("box_damage_severity", "unknown")
+    product_condition = analysis_result.get("product_condition", "unknown")
+    
+    # Generate appropriate response based on decision
+    if decision == "refund":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "damaged_shipping_box",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Refund Approved: {reason}"
+        })
+        state["response"] = (
+            f"I've analyzed the image of your damaged shipping box. Based on the {box_damage_severity} box damage "
+            f"and the product condition ({product_condition}), I've determined that a **refund** is the appropriate action.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"Your refund will be processed within 5-7 business days. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "refund",
+            "issue_type": "damaged_shipping_box",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": True
+        }
+    elif decision == "replace":
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "damaged_shipping_box",
+            "description": message,
+            "status": "resolved",
+            "created_at": datetime.now().isoformat(),
+            "resolution": f"Replacement Approved: {reason}"
+        })
+        state["response"] = (
+            f"I've analyzed the image of your damaged shipping box. Based on the {box_damage_severity} box damage "
+            f"and the product condition ({product_condition}), I've determined that a **replacement** is the appropriate action.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"A replacement product will be shipped to you within 2-3 business days. You'll receive a tracking number via email. "
+            f"Please return the damaged item using the prepaid return label that will be included. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "replace",
+            "issue_type": "damaged_shipping_box",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": True
+        }
+    else:  # escalate
+        case_id = str(uuid.uuid4())[:8].upper()
+        create_complaint({
+            "id": case_id,
+            "user_id": state.get("user_id"),
+            "session_id": state.get("session_id"),
+            "issue_type": "damaged_shipping_box",
+            "description": message,
+            "status": "open",
+            "created_at": datetime.now().isoformat(),
+            "resolution": None
+        })
+        state["response"] = (
+            f"I've reviewed your damaged shipping box report. This case requires additional review by our human support team.\n\n"
+            f"**Reason:** {reason}\n\n"
+            f"A support agent will contact you within 24 hours to resolve this issue. "
+            f"Your case reference number is: {case_id}. Is there anything else I can help you with?"
+        )
+        state["data"] = {
+            "action": "escalate",
+            "issue_type": "damaged_shipping_box",
+            "analysis": analysis_result,
+            "case_id": case_id,
+            "resolved": False
+        }
+    
+    return state
+
+# ============================================
+# Agent Nodes
+# ============================================
+
+def intent_detection_node(state: AgentState) -> AgentState:
+    """Node to detect user intent."""
+    state["intent"] = detect_intent(state["message"], state.get("context", {}), state.get("chat_history", []))
+    return state
+
+def recommendation_agent(state: AgentState) -> AgentState:
+    """Consolidated agent for recommendations and general conversation."""
+    intent = state.get("intent", "")
+    
+    if "recommendation" in intent:
+        state = _handle_recommendation_logic(state)
+        state = _handle_response_generation_logic(state)
+    else:
+        # Generic fallback or other non-transactional intents
+        state = _handle_response_generation_logic(state)
+    
+    return state
+
+def purchase_agent(state: AgentState) -> AgentState:
+    """Consolidated agent for purchase, shipping, and order status."""
+    intent = state.get("intent", "")
+    
+    if any(keyword in intent for keyword in ["purchase_accept", "purchase_decline", "product_selection"]):
+        state = _handle_purchase_processing(state)
+    elif "purchase_info" in intent:
+        state = _handle_purchase_info(state)
+    elif "order_shipping_status" in intent:
+        state = _handle_order_shipping_status(state)
+    else:
+        # Fallback if wrongly routed, or maybe handle generic purchase questions
+        state = _handle_response_generation_logic(state)
+        
+    return state
+
+def fraud_detection_agent(state: AgentState) -> AgentState:
+    """Consolidated agent for fraud detection, defects, and damaged goods."""
+    intent = state.get("intent", "")
+    
+    if "fraudulent_transaction" in intent:
+        state = _handle_fraudulent_transaction(state)
+    elif "product_defect" in intent:
+        state = _handle_product_defect(state)
+    elif "damaged_shipping_box" in intent:
+        state = _handle_damaged_shipping_box(state)
+    else:
+        # Fallback
+        state = _handle_response_generation_logic(state)
+        
     return state
 
 # ============================================
@@ -320,74 +575,81 @@ def fraudulent_transaction_node(state: AgentState) -> AgentState:
 # ============================================
 
 def route_by_intent(state: AgentState) -> str:
-    """Route to the appropriate node based on intent."""
+    """Route to the appropriate agent based on intent."""
     intent = state["intent"]
+    
+    # Recommendation / General
     if "recommendation" in intent:
-        return "recommendation"
+        return "recommendation_agent"
+        
+    # Purchase Related
     if any(keyword in intent for keyword in ["purchase_accept", "purchase_decline", "product_selection"]):
-        return "purchase_processing"
+        return "purchase_agent"
     if "purchase_info" in intent:
-        return "purchase_info"
-    if "product_defect" in intent:
-        return "product_defect"
-    if "damaged_shipping_box" in intent:
-        return "damaged_shipping_box"
+        return "purchase_agent"
+    if "order_shipping_status" in intent:
+        return "purchase_agent"
+        
+    # Fraud / Claims Related
     if "fraudulent_transaction" in intent:
-        return "fraudulent_transaction"
-    return "response_generation"
+        return "fraud_detection_agent"
+    if "product_defect" in intent:
+        return "fraud_detection_agent"
+    if "damaged_shipping_box" in intent:
+        return "fraud_detection_agent"
+        
+    # Default to recommendation agent (which handles generic response generation)
+    return "recommendation_agent"
 
 # ============================================
 # Build LangGraph
 # ============================================
 
 def create_agent_graph():
-    """Create the LangGraph agent workflow."""
+    """Create the LangGraph agent workflow with 3 consolidated agents."""
     workflow = StateGraph(AgentState)
+    
+    # Add nodes
     workflow.add_node("intent_detection", intent_detection_node)
-    workflow.add_node("recommendation", recommendation_node)
-    workflow.add_node("response_generation", response_generation_node)
-    workflow.add_node("purchase_processing", purchase_processing_node)
-    workflow.add_node("purchase_info", purchase_info_node)
-    workflow.add_node("product_defect", product_defect_node)
-    workflow.add_node("damaged_shipping_box", damaged_shipping_box_node)
-    workflow.add_node("fraudulent_transaction", fraudulent_transaction_node)
+    workflow.add_node("recommendation_agent", recommendation_agent)
+    workflow.add_node("purchase_agent", purchase_agent)
+    workflow.add_node("fraud_detection_agent", fraud_detection_agent)
 
+    # Set entry point
     workflow.set_entry_point("intent_detection")
+    
+    # Conditional edges from intent detection
     workflow.add_conditional_edges(
         "intent_detection",
         route_by_intent,
         {
-            "recommendation": "recommendation",
-            "purchase_processing": "purchase_processing",
-            "purchase_info": "purchase_info",
-            "product_defect": "product_defect",
-            "damaged_shipping_box": "damaged_shipping_box",
-            "fraudulent_transaction": "fraudulent_transaction",
-            "response_generation": "response_generation",
+            "recommendation_agent": "recommendation_agent",
+            "purchase_agent": "purchase_agent",
+            "fraud_detection_agent": "fraud_detection_agent",
         },
     )
-    workflow.add_edge("recommendation", "response_generation")
-    workflow.add_edge("purchase_processing", END)
-    workflow.add_edge("purchase_info", END)
-    workflow.add_edge("product_defect", END)
-    workflow.add_edge("damaged_shipping_box", END)
-    workflow.add_edge("fraudulent_transaction", END)
-    workflow.add_edge("response_generation", END)
+    
+    # Edges back to END
+    workflow.add_edge("recommendation_agent", END)
+    workflow.add_edge("purchase_agent", END)
+    workflow.add_edge("fraud_detection_agent", END)
+    
     return workflow.compile()
 
 # ============================================
 # Main Execution Block
 # ============================================
 
-# --- MODIFICATION: Pass chat_history to the run_agent function ---
-def run_agent(message: str, context: Dict[str, Any], chat_history: List, agent_graph, image_url: Optional[str] = None, image_type: Optional[str] = None) -> AgentState:
+def run_agent(message: str, context: Dict[str, Any], chat_history: List, agent_graph, image_url: Optional[str] = None, image_type: Optional[str] = None, user_id: Optional[str] = None, session_id: Optional[str] = None) -> AgentState:
     """Single entry point to run the agent for one turn."""
     initial_state = {
         "message": message,
         "context": context or {},
         "chat_history": chat_history,
         "image_url": image_url,
-        "image_type": image_type
+        "image_type": image_type,
+        "user_id": user_id,
+        "session_id": session_id
     }
     return agent_graph.invoke(initial_state)
 
@@ -395,7 +657,6 @@ if __name__ == "__main__":
     agent_graph = create_agent_graph()
     print("Chatbot initialized. Type 'quit' to exit.")
     chat_context = {}
-    # --- MODIFICATION: Initialize and manage chat_history in the main loop ---
     chat_history = []
 
     while True:
@@ -407,6 +668,5 @@ if __name__ == "__main__":
         print(f"Bot: {final_state['response']}")
 
         chat_context.update(final_state.get('data', {}))
-        # --- MODIFICATION: Append user and bot messages to the history ---
         chat_history.append({"role": "user", "content": user_input})
         chat_history.append({"role": "assistant", "content": final_state['response']})

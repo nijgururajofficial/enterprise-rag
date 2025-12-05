@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { FiShoppingCart, FiUser, FiMenu, FiX, FiLogOut, FiSearch, FiFilter } from 'react-icons/fi';
+import { FiShoppingCart, FiUser, FiMenu, FiX, FiLogOut, FiSearch, FiFilter, FiPackage, FiAlertCircle } from 'react-icons/fi';
 import { useAuth } from '../context/AuthContext';
 import { useCart } from '../context/CartContext';
 import './Navbar.css';
@@ -85,6 +85,14 @@ const Navbar = ({ onSearch, onSort, onFilter, searchTerm, sortBy, filterBy }) =>
                 </button>
                 {isUserMenuOpen && (
                   <div className="user-menu-dropdown">
+                    <Link to="/orders" className="user-menu-item" onClick={() => setIsUserMenuOpen(false)}>
+                        <FiPackage size={16} />
+                        My Orders
+                    </Link>
+                    <Link to="/complaints" className="user-menu-item" onClick={() => setIsUserMenuOpen(false)}>
+                        <FiAlertCircle size={16} />
+                        My Complaints
+                    </Link>
                     <button onClick={handleLogout} className="user-menu-item">
                       <FiLogOut size={16} />
                       Logout
@@ -156,6 +164,12 @@ const Navbar = ({ onSearch, onSort, onFilter, searchTerm, sortBy, filterBy }) =>
               <>
                 <Link to="/cart" className="mobile-nav-link" onClick={() => setIsMenuOpen(false)}>
                   Cart ({cartItemCount})
+                </Link>
+                <Link to="/orders" className="mobile-nav-link" onClick={() => setIsMenuOpen(false)}>
+                  My Orders
+                </Link>
+                <Link to="/complaints" className="mobile-nav-link" onClick={() => setIsMenuOpen(false)}>
+                  My Complaints
                 </Link>
                 <button onClick={handleLogout} className="mobile-nav-link logout-btn">
                   Logout

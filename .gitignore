@@ -14,6 +14,14 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Backend specific
+backend/chroma_db/
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/ecommerce.db
+backend/agent_graph.png
+
 # Environment variables
 .env
 .env.local
@@ -21,6 +29,15 @@ Desktop.ini
 
 # Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node modules (Frontend)
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/.eslintcache
 
 # Temporary files
 *.tmp
@@ -41,4 +58,3 @@ secrets/
 credentials/
 *.key
 api_keys.txt
-

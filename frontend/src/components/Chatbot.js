@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { FiMessageCircle, FiX, FiSend, FiShoppingCart } from 'react-icons/fi';
+import { FiMessageCircle, FiX, FiSend, FiShoppingCart, FiImage, FiXCircle } from 'react-icons/fi';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useSidebar } from '../App';
+import { useAuth } from '../context/AuthContext';
 import './Chatbot.css';
 
 const API_URL = 'http://localhost:8000';
@@ -19,6 +22,7 @@ const CATEGORY_LABELS = CATEGORY_SHORTCUTS.reduce((acc, item) => {
 
 const Chatbot = ({ onRecommendations }) => {
   const { isSidebarOpen, setIsSidebarOpen } = useSidebar();
+  const { user } = useAuth();
   const [messages, setMessages] = useState([
     {
       id: 1,
@@ -31,6 +35,9 @@ const Chatbot = ({ onRecommendations }) => {
   const [isTyping, setIsTyping] = useState(false);
   const [sessionId, setSessionId] = useState(null);
   const [categoryStats, setCategoryStats] = useState({});
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
 
   const handleCategoryClick = (prompt) => {
@@ -62,19 +69,70 @@ const Chatbot = ({ onRecommendations }) => {
     textarea.style.height = newHeight + 'px';
   };
 
+  const handleImageSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      // Validate file type
+      if (!file.type.startsWith('image/')) {
+        alert('Please select an image file');
+        return;
+      }
+      
+      // Validate file size (max 10MB)
+      if (file.size > 10 * 1024 * 1024) {
+        alert('Image size should be less than 10MB');
+        return;
+      }
+
+      setSelectedImage(file);
+      
+      // Create preview
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const detectImageType = (message) => {
+    const messageLower = message.toLowerCase();
+    if (messageLower.includes('defect') || messageLower.includes('broken') || 
+        messageLower.includes('damaged product') || messageLower.includes('faulty')) {
+      return 'product_defect';
+    } else if (messageLower.includes('damaged box') || messageLower.includes('shipping box') || 
+               messageLower.includes('package box') || messageLower.includes('delivery box')) {
+      return 'damaged_shipping_box';
+    } else if (messageLower.includes('fraud') || messageLower.includes('fraudulent') || 
+               messageLower.includes('unauthorized') || messageLower.includes('credit card') || 
+               messageLower.includes('transaction')) {
+      return 'fraudulent_transaction_ocr';
+    }
+    return null;
+  };
+
   const handleSendMessage = async (e, overrideMessage) => {
     if (e?.preventDefault) {
       e.preventDefault();
     }
 
     const messageText = (overrideMessage ?? inputMessage).trim();
-    if (!messageText) return;
+    if (!messageText && !selectedImage) return;
 
     const userMessage = {
       id: `user-${Date.now()}`,
-      text: messageText,
+      text: messageText || (selectedImage ? '📷 [Image attached]' : ''),
       sender: 'user',
-      timestamp: new Date()
+      timestamp: new Date(),
+      image: imagePreview
     };
 
     setMessages(prev => [...prev, userMessage]);
@@ -88,14 +146,54 @@ const Chatbot = ({ onRecommendations }) => {
     }
 
     try {
-      // Call the unified /chat endpoint
-      const response = await axios.post(
-        `${API_URL}/chat`,
-        {
-          message: messageText,
-          session_id: sessionId
+      let response;
+      const token = localStorage.getItem('token');
+      const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
+      
+      // If image is selected, use form-data upload endpoint
+      if (selectedImage) {
+        const formData = new FormData();
+        formData.append('message', messageText || '');
+        formData.append('image', selectedImage);
+        if (sessionId) {
+          formData.append('session_id', sessionId);
         }
-      );
+        
+        // Auto-detect image type if not explicitly set
+        const imageType = detectImageType(messageText);
+        if (imageType) {
+          formData.append('image_type', imageType);
+        }
+        
+        // No need to append user_id manually if we use token
+        
+        response = await axios.post(
+          `${API_URL}/chat/upload`,
+          formData,
+          {
+            headers: {
+              'Content-Type': 'multipart/form-data',
+              ...authHeaders
+            }
+          }
+        );
+        
+        // Clear image after sending
+        handleRemoveImage();
+      } else {
+        // Regular text message
+        const payload = {
+            message: messageText,
+            session_id: sessionId
+        };
+        // No need to append user_id manually if we use token
+
+        response = await axios.post(
+          `${API_URL}/chat`,
+          payload,
+          { headers: authHeaders }
+        );
+      }
 
       const data = response.data;
       
@@ -170,17 +268,31 @@ const Chatbot = ({ onRecommendations }) => {
   };
 
   const renderMessageContent = (message) => {
-    // Format message text with line breaks
-    const formattedText = message.text.split('\n').map((line, idx) => (
-      <React.Fragment key={idx}>
-        {line}
-        {idx < message.text.split('\n').length - 1 && <br />}
-      </React.Fragment>
-    ));
-
     return (
       <div className="message-content">
-        <div className="message-text">{formattedText}</div>
+        <div className="message-text">
+          <ReactMarkdown 
+            remarkPlugins={[remarkGfm]}
+            components={{
+              // Customize rendering for specific elements
+              p: ({node, ...props}) => <p style={{margin: '0.5em 0'}} {...props} />,
+              ul: ({node, ...props}) => <ul style={{marginLeft: '1.5em', marginTop: '0.5em'}} {...props} />,
+              ol: ({node, ...props}) => <ol style={{marginLeft: '1.5em', marginTop: '0.5em'}} {...props} />,
+              li: ({node, ...props}) => <li style={{marginBottom: '0.25em'}} {...props} />,
+              strong: ({node, ...props}) => <strong style={{fontWeight: '600', color: 'inherit'}} {...props} />,
+              em: ({node, ...props}) => <em style={{fontStyle: 'italic'}} {...props} />,
+              h1: ({node, ...props}) => <h1 style={{fontSize: '1.5em', marginTop: '0.5em', marginBottom: '0.5em'}} {...props} />,
+              h2: ({node, ...props}) => <h2 style={{fontSize: '1.3em', marginTop: '0.5em', marginBottom: '0.5em'}} {...props} />,
+              h3: ({node, ...props}) => <h3 style={{fontSize: '1.1em', marginTop: '0.5em', marginBottom: '0.5em'}} {...props} />,
+              code: ({node, inline, ...props}) => 
+                inline 
+                  ? <code style={{backgroundColor: 'rgba(0,0,0,0.1)', padding: '0.2em 0.4em', borderRadius: '3px'}} {...props} />
+                  : <code style={{display: 'block', backgroundColor: 'rgba(0,0,0,0.1)', padding: '0.8em', borderRadius: '5px', overflowX: 'auto'}} {...props} />,
+            }}
+          >
+            {message.text}
+          </ReactMarkdown>
+        </div>
         
         {/* Display product information if available */}
         {message.data?.product && (
@@ -210,6 +322,39 @@ const Chatbot = ({ onRecommendations }) => {
             <div className="order-number">
               Order #{message.data.order_id}
             </div>
+          </div>
+        )}
+
+        {/* Display action result cards (refund/replace/escalate) */}
+        {message.data?.action && (
+          <div className={`action-card action-${message.data.action}`}>
+            <div className="action-header">
+              {message.data.action === 'refund' && '💰 Refund Approved'}
+              {message.data.action === 'replace' && '🔄 Replacement Approved'}
+              {message.data.action === 'escalate' && '👤 Escalated to Support'}
+              {message.data.action === 'decline' && '❌ Request Declined'}
+            </div>
+            {message.data.analysis && (
+              <div className="action-details">
+                {message.data.analysis.reason && (
+                  <div className="action-reason">
+                    <strong>Reason:</strong> {message.data.analysis.reason}
+                  </div>
+                )}
+                {message.data.case_id && (
+                  <div className="action-case-id">
+                    <strong>Case ID:</strong> {message.data.case_id}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Display uploaded image in user messages */}
+        {message.image && (
+          <div className="message-image-preview">
+            <img src={message.image} alt="Uploaded" />
           </div>
         )}
         
@@ -289,7 +434,34 @@ const Chatbot = ({ onRecommendations }) => {
             <div ref={messagesEndRef} />
           </div>
 
+          {/* Image Preview */}
+          {imagePreview && (
+            <div className="image-preview-container">
+              <div className="image-preview">
+                <img src={imagePreview} alt="Preview" />
+                <button 
+                  className="remove-image-btn"
+                  onClick={handleRemoveImage}
+                  aria-label="Remove image"
+                >
+                  <FiXCircle size={20} />
+                </button>
+              </div>
+            </div>
+          )}
+
           <form className="chatbot-input-container" onSubmit={handleSendMessage}>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleImageSelect}
+              accept="image/*"
+              style={{ display: 'none' }}
+              id="image-upload"
+            />
+            <label htmlFor="image-upload" className="attach-image-btn" title="Attach image">
+              <FiImage size={20} />
+            </label>
             <textarea
               placeholder="Type your message... (Shift+Enter for new line)"
               value={inputMessage}
@@ -301,7 +473,7 @@ const Chatbot = ({ onRecommendations }) => {
             <button 
               type="submit"
               className="send-btn"
-              disabled={!inputMessage.trim()}
+              disabled={!inputMessage.trim() && !selectedImage}
               aria-label="Send message"
             >
               <FiSend size={18} />

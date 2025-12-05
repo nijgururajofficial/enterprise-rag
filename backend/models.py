@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None  # For maintaining conversation context
     image_url: Optional[str] = None  # URL or base64 encoded image for product defects, shipping boxes, or OCR
     image_type: Optional[str] = None  # "product_defect", "damaged_shipping_box", "fraudulent_transaction_ocr"
@@ -34,6 +35,21 @@ class PurchaseRequest(BaseModel):
 class PurchaseResponse(BaseModel):
     order_id: str
     status: str
+
+class OrderResponse(BaseModel):
+    order_id: str
+    status: str
+    order_date: Optional[str] = None
+    items: Dict[str, int] = {}
+    total_amount: Optional[float] = 0.0
+
+class ComplaintResponse(BaseModel):
+    id: str
+    issue_type: str
+    description: str
+    status: str
+    created_at: str
+    resolution: Optional[str] = None
 
 # Checkout request for cart checkout
 class CheckoutRequest(BaseModel):

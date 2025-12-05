@@ -1,7 +1,6 @@
 import os
-import re
 from typing import Dict, Any, Tuple, List
-from database import products
+from database import search_products_vector
 from dotenv import load_dotenv
 # from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -9,8 +8,19 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
-from prompts import get_intent_detection_prompt, get_product_extraction_prompt
-import base64
+from prompts import (
+    get_intent_detection_prompt, 
+    get_product_extraction_prompt,
+    get_single_recommendation_prompt,
+    get_multiple_recommendations_prompt,
+    get_general_chat_prompt,
+    get_purchase_info_extraction_prompt,
+    get_order_id_extraction_prompt,
+    get_fraud_analysis_prompt,
+    get_product_defect_analysis_prompt,
+    get_damaged_box_analysis_prompt
+)
+
 
 # Load environment variables
 load_dotenv()
@@ -108,20 +118,18 @@ def get_product_recommendations(user_query: str) -> List[Dict[str, Any]]:
         extracted_query.setdefault("features", [])
 
         # --- STRICT FILTERING LOGIC ---
-        filtered_products = [
-            p for p in products.values()
-            if p["category"] == extracted_query["category"]
-            and extracted_query["min_price"] <= p["price"] <= extracted_query["max_price"]
-            and p.get("rating", 0) >= extracted_query["min_rating"]
-        ]
-
-        # --- FEATURE MATCHING ---
-        if extracted_query["features"]:
-            filtered_products = [
-                p for p in filtered_products
-                if all(feature.lower() in p["description"].lower()
-                       for feature in extracted_query["features"])
-            ]
+        # Using Vector Search for better semantic matching and filtering
+        filter_criteria = {
+            "category": extracted_query["category"],
+            "min_price": extracted_query["min_price"],
+            "max_price": extracted_query["max_price"],
+            "min_rating": extracted_query["min_rating"]
+        }
+        
+        # Construct a search query from features and category
+        search_text = f"{extracted_query['category']} {' '.join(extracted_query['features'])}"
+        
+        filtered_products = search_products_vector(search_text, k=10, filter_criteria=filter_criteria)
 
         # Sort by rating (high to low)
         filtered_products.sort(key=lambda x: x.get("rating", 0), reverse=True)
@@ -143,16 +151,7 @@ def generate_response(intent: str, user_message: str, context: Dict[str, Any], r
 
         if len(recommendations) == 1:
             product = recommendations[0]
-            prompt = ChatPromptTemplate.from_template(
-                """
-                You are a friendly shopping assistant. You have found a perfect match for the user.
-                Present the product and ask if they would like to purchase it.
-
-                Product Name: {name} (${price})
-                Rating: {rating}/5.0
-                Description: {description}
-                """
-            )
+            prompt = get_single_recommendation_prompt()
             chain = prompt | llm | StrOutputParser()
             response = chain.invoke({
                 "name": product["name"], "price": f"{product['price']:.2f}",
@@ -161,28 +160,28 @@ def generate_response(intent: str, user_message: str, context: Dict[str, Any], r
             return response, {"product": product, "recommended_product": product, "awaiting_purchase_decision": True}
         else:
             options = "".join([f"Option {i+1}: {p['name']} (${p['price']:.2f})\n" for i, p in enumerate(recommendations[:3])])
-            prompt = ChatPromptTemplate.from_template(
-                """
-                You are a friendly shopping assistant. You found a few great options for the user.
-                Present these options and ask them to choose one.
-
-                Options:
-                {options}
-                Keep the response concise and friendly.
-                """
-            )
+            prompt = get_multiple_recommendations_prompt()
             chain = prompt | llm | StrOutputParser()
             response = chain.invoke({"options": options})
             return response, {"recommendations": recommendations, "multiple_recommendations": True}
 
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are a shopping assistant.
-        Conversation History:
-        {chat_history}
-        The user said: '{user_message}'. Respond helpfully.
-        """
-    )
+    if intent == "product_selection":
+        # Handle product selection from previous recommendations
+        prev_recommendations = context.get("recommendations", [])
+        option_num = extract_option_number(user_message)
+        
+        if prev_recommendations and option_num and 0 < option_num <= len(prev_recommendations):
+            product = prev_recommendations[option_num - 1]
+            # --- MODIFICATION: Prepare for purchase instead of declining ---
+            return (
+                f"Great choice! The **{product['name']}** is an excellent product. "
+                f"Would you like to proceed with purchasing this item?",
+                {"product": product, "recommended_product": product, "awaiting_purchase_decision": True}
+            )
+        else:
+            return "I'm not sure which option you selected. Please say 'Option 1', 'Option 2', etc.", {}
+
+    prompt = get_general_chat_prompt()
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({
         "user_message": user_message,
@@ -199,21 +198,21 @@ def extract_purchase_info(message: str) -> Dict[str, str]:
         payment: str = Field(description="The payment method (e.g., 'Credit Card', 'PayPal').")
 
     parser = JsonOutputParser(pydantic_object=PurchaseInfo)
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are an expert at extracting structured information.
-        Extract the user's name, shipping address, and payment method from the message.
-
-        Message: "{message}"
-        {format_instructions}
-        """
-    )
+    prompt = get_purchase_info_extraction_prompt()
     chain = prompt | llm | parser
     try:
         return chain.invoke({"message": message, "format_instructions": parser.get_format_instructions()})
     except Exception as e:
         print(f"Error in LLM-based info extraction: {e}")
         return {}
+
+
+def extract_order_id(message: str) -> str:
+    """Extracts an order ID from the user's message."""
+    prompt = get_order_id_extraction_prompt()
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({"message": message}).strip()
+    return None if result == "None" else result
 
 # ============================================
 # Helper Functions
@@ -225,11 +224,50 @@ def extract_option_number(message: str) -> int:
     for num_str, num_val in [('1', 1), ('2', 2), ('3', 3), ('one', 1), ('two', 2), ('three', 3)]:
         if num_str in message_lower:
             return num_val
+    # Fallback to simple digit extraction
+    import re
+    digits = re.findall(r'\d+', message)
+    if digits:
+        return int(digits[0])
     return None
 
 # ============================================
 # Image Analysis Functions
 # ============================================
+
+
+def analyze_fraudulent_transaction_ocr(image_url: str, user_message: str) -> Dict[str, Any]:
+    """
+    Analyzes an OCR image of a credit card statement and determines the appropriate action:
+    Refund, Decline, or Escalate to Human-Agent.
+    """
+    if not vision_llm:
+        return {"decision": "escalate", "reason": "Vision model not available"}
+    
+    prompt = get_fraud_analysis_prompt()
+    
+    try:
+        if image_url.startswith("data:image"):
+            image_content = image_url
+        elif image_url.startswith("http"):
+            image_content = image_url
+        else:
+            image_content = f"data:image/jpeg;base64,{image_url}"
+        
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt.format(user_message=user_message)},
+                {"type": "image_url", "image_url": {"url": image_content}}
+            ]
+        )
+        
+        parser = JsonOutputParser()
+        chain = vision_llm | parser
+        result = chain.invoke([message])
+        return result
+    except Exception as e:
+        print(f"Error analyzing fraudulent transaction OCR: {e}")
+        return {"decision": "escalate", "reason": f"Error analyzing image: {str(e)}"}
 
 def analyze_product_defect_image(image_url: str, user_message: str) -> Dict[str, Any]:
     """
@@ -239,30 +277,7 @@ def analyze_product_defect_image(image_url: str, user_message: str) -> Dict[str,
     if not vision_llm:
         return {"decision": "escalate", "reason": "Vision model not available"}
     
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are an expert customer service agent analyzing a product defect image.
-        Analyze the image and determine the appropriate action based on:
-        1. Severity of the defect
-        2. Whether it's a manufacturing defect or user damage
-        3. Product value and replacement cost
-        
-        User's message: "{user_message}"
-        
-        Return a JSON response with:
-        - decision: "refund", "replace", or "escalate"
-        - reason: Brief explanation of your decision
-        - severity: "minor", "moderate", or "severe"
-        - defect_type: Description of the defect observed
-        
-        Guidelines:
-        - Refund: For severe defects, high-value items with significant issues, or when replacement isn't feasible
-        - Replace: For moderate defects that can be resolved with a replacement, especially for lower-value items
-        - Escalate: For unclear cases, potential fraud, or when human judgment is needed
-        
-        Return only valid JSON.
-        """
-    )
+    prompt = get_product_defect_analysis_prompt()
     
     try:
         # Handle base64 or URL images
@@ -299,30 +314,7 @@ def analyze_damaged_shipping_box_image(image_url: str, user_message: str) -> Dic
     if not vision_llm:
         return {"decision": "escalate", "reason": "Vision model not available"}
     
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are an expert customer service agent analyzing a damaged shipping box image.
-        Analyze the image and determine the appropriate action based on:
-        1. Extent of box damage
-        2. Likelihood of product damage inside
-        3. Whether the product appears intact or damaged
-        
-        User's message: "{user_message}"
-        
-        Return a JSON response with:
-        - decision: "refund", "replace", or "escalate"
-        - reason: Brief explanation of your decision
-        - box_damage_severity: "minor", "moderate", or "severe"
-        - product_condition: "likely_intact", "possibly_damaged", or "likely_damaged"
-        
-        Guidelines:
-        - Refund: For severe box damage with likely product damage, or when customer prefers refund
-        - Replace: For moderate damage where replacement is appropriate and product may be damaged
-        - Escalate: For unclear cases, potential fraud, or when product condition is uncertain
-        
-        Return only valid JSON.
-        """
-    )
+    prompt = get_damaged_box_analysis_prompt()
     
     try:
         if image_url.startswith("data:image"):
@@ -345,62 +337,4 @@ def analyze_damaged_shipping_box_image(image_url: str, user_message: str) -> Dic
         return result
     except Exception as e:
         print(f"Error analyzing damaged shipping box image: {e}")
-        return {"decision": "escalate", "reason": f"Error analyzing image: {str(e)}"}
-
-def analyze_fraudulent_transaction_ocr(image_url: str, user_message: str) -> Dict[str, Any]:
-    """
-    Analyzes an OCR image of a credit card statement and determines the appropriate action:
-    Refund, Decline, or Escalate to Human-Agent.
-    """
-    if not vision_llm:
-        return {"decision": "escalate", "reason": "Vision model not available"}
-    
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are an expert fraud detection agent analyzing a credit card statement OCR image.
-        Analyze the image and determine the appropriate action based on:
-        1. Whether the transaction appears legitimate
-        2. Transaction amount and details
-        3. Evidence of fraud or unauthorized charges
-        
-        User's message: "{user_message}"
-        
-        Return a JSON response with:
-        - decision: "refund", "decline", or "escalate"
-        - reason: Brief explanation of your decision
-        - transaction_amount: Extracted transaction amount if visible
-        - transaction_date: Extracted transaction date if visible
-        - fraud_indicators: List of any suspicious indicators found
-        - confidence: "high", "medium", or "low" - your confidence in the decision
-        
-        Guidelines:
-        - Refund: For clearly unauthorized transactions, confirmed fraud, or legitimate disputes
-        - Decline: For legitimate transactions that the customer incorrectly reported, or insufficient evidence
-        - Escalate: For unclear cases, high-value transactions, or when human review is needed
-        
-        Return only valid JSON.
-        """
-    )
-    
-    try:
-        if image_url.startswith("data:image"):
-            image_content = image_url
-        elif image_url.startswith("http"):
-            image_content = image_url
-        else:
-            image_content = f"data:image/jpeg;base64,{image_url}"
-        
-        message = HumanMessage(
-            content=[
-                {"type": "text", "text": prompt.format(user_message=user_message)},
-                {"type": "image_url", "image_url": {"url": image_content}}
-            ]
-        )
-        
-        parser = JsonOutputParser()
-        chain = vision_llm | parser
-        result = chain.invoke([message])
-        return result
-    except Exception as e:
-        print(f"Error analyzing fraudulent transaction OCR: {e}")
         return {"decision": "escalate", "reason": f"Error analyzing image: {str(e)}"}

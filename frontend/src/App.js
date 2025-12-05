@@ -13,6 +13,8 @@ import Products from './pages/Products';
 import ProductDetail from './pages/ProductDetail';
 import Cart from './pages/Cart';
 import Checkout from './pages/Checkout';
+import Orders from './pages/Orders';
+import Complaints from './pages/Complaints';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -95,6 +97,22 @@ function App() {
                     element={
                       <ProtectedRoute>
                         <Checkout />
+                      </ProtectedRoute>
+                    } 
+                  />
+                  <Route 
+                    path="/orders" 
+                    element={
+                      <ProtectedRoute>
+                        <Orders />
+                      </ProtectedRoute>
+                    } 
+                  />
+                  <Route 
+                    path="/complaints" 
+                    element={
+                      <ProtectedRoute>
+                        <Complaints />
                       </ProtectedRoute>
                     } 
                   />
