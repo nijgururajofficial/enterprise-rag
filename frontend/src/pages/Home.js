@@ -6,10 +6,11 @@ import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
 import './Home.css';
 
-const Home = ({ searchTerm, sortBy, filterBy }) => {
+const Home = ({ searchTerm, sortBy, filterBy, recommendedProducts }) => {
   const [allProducts, setAllProducts] = useState([]);
   const [filteredProducts, setFilteredProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showRecommended, setShowRecommended] = useState(false);
   const { addToCart } = useCart();
   const { isAuthenticated } = useAuth();
 
@@ -29,6 +30,15 @@ const Home = ({ searchTerm, sortBy, filterBy }) => {
 
     fetchProducts();
   }, []);
+
+  // Update showRecommended when recommendedProducts change
+  useEffect(() => {
+    if (recommendedProducts && recommendedProducts.length > 0) {
+      setShowRecommended(true);
+    } else if (recommendedProducts && recommendedProducts.length === 0) {
+      setShowRecommended(false);
+    }
+  }, [recommendedProducts]);
 
   useEffect(() => {
     let filtered = [...allProducts];
@@ -85,6 +95,11 @@ const Home = ({ searchTerm, sortBy, filterBy }) => {
     );
   }
 
+  // Determine which products to display
+  const displayProducts = showRecommended && recommendedProducts && recommendedProducts.length > 0 
+    ? recommendedProducts 
+    : filteredProducts;
+
   return (
     <div className="home">
       {/* All Products Grid */}
@@ -92,20 +107,45 @@ const Home = ({ searchTerm, sortBy, filterBy }) => {
         <div className="container">
           <div className="section-header">
             <h2 className="section-title">
-              {searchTerm ? `Search Results for "${searchTerm}"` : 'All Products'}
+              {showRecommended && recommendedProducts && recommendedProducts.length > 0 
+                ? '🔍 Recommended Products' 
+                : searchTerm 
+                  ? `Search Results for "${searchTerm}"` 
+                  : 'All Products'
+              }
             </h2>
-            <p className="section-description">
-              {filteredProducts.length} {filteredProducts.length === 1 ? 'product' : 'products'} found
-            </p>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+              <p className="section-description">
+                {displayProducts.length} {displayProducts.length === 1 ? 'product' : 'products'} found
+              </p>
+              {recommendedProducts && recommendedProducts.length > 0 && (
+                <button 
+                  onClick={() => setShowRecommended(!showRecommended)}
+                  style={{
+                    padding: '8px 16px',
+                    backgroundColor: showRecommended ? '#f0f0f0' : '#007bff',
+                    color: showRecommended ? '#333' : 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {showRecommended ? 'Show All Products' : 'Show Recommendations'}
+                </button>
+              )}
+            </div>
           </div>
 
-          {filteredProducts.length === 0 ? (
+          {displayProducts.length === 0 ? (
             <div className="no-products">
               <p>No products found matching your criteria.</p>
             </div>
           ) : (
             <div className="products-grid">
-              {filteredProducts.map((product) => (
+              {displayProducts.map((product) => (
                 <div key={product.id} className="product-card">
                   <Link to={`/products/${product.id}`} className="product-link">
                     <div className="product-image">

@@ -6,6 +6,8 @@ class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None  # For maintaining conversation context
+    image_url: Optional[str] = None  # URL or base64 encoded image for product defects, shipping boxes, or OCR
+    image_type: Optional[str] = None  # "product_defect", "damaged_shipping_box", "fraudulent_transaction_ocr"
 
 class ChatResponse(BaseModel):
     message: str
@@ -32,6 +34,11 @@ class PurchaseRequest(BaseModel):
 class PurchaseResponse(BaseModel):
     order_id: str
     status: str
+
+# Checkout request for cart checkout
+class CheckoutRequest(BaseModel):
+    shipping_address: str
+    payment_method: str
 
 # User authentication models
 class UserLogin(BaseModel):

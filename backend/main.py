@@ -1,20 +1,23 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import base64
 from models import (
-    QueryRequest, PurchaseRequest, PurchaseResponse, RecommendationResponse,
-    UserLogin, UserRegister, LoginResponse, UserResponse, CartResponse,
-    AddToCartRequest, ProductResponse, ChatMessage, ChatResponse
+    PurchaseResponse,
+    UserLogin, UserRegister, LoginResponse, CartResponse,
+    AddToCartRequest, ProductResponse, ChatMessage, ChatResponse, CheckoutRequest
 )
 from database import products, orders, users, carts, sessions
-from agents import get_product_recommendations, detect_intent, generate_response, extract_purchase_info
+from agents import run_agent, create_agent_graph
 import uuid
 import jwt
-import re
 from typing import List, Optional
 from datetime import datetime
 
 app = FastAPI(title="Electronics Retail API")
+
+# Create the agent graph at module level
+agent_graph = create_agent_graph()
 
 # Add CORS middleware
 app.add_middleware(
@@ -107,403 +110,148 @@ def login(user_data: UserLogin):
         }
     }
 
-# ============================================
-# UNIFIED CHAT ENDPOINT - Main AI Agent Interface
-# ============================================
-"""
-UNIFIED MESSAGING SYSTEM - How it works:
-
-1. Customer sends a message from the browser to /chat endpoint
-2. The endpoint routes the message to the correct AI Agent based on detected intent
-3. AI Agent uses customer preferences/needs to recommend products
-4. Customer can accept (purchase) or decline the recommendation
-5. If accepting, customer provides Name, Shipping Address, and Payment in a message
-6. System validates the information and completes the transaction
-7. Customer receives an order number upon successful purchase
-
-Example conversation flow:
-- User: "I need a laptop for work"
-- AI: Recommends laptop with details, asks if they want to purchase
-- User: "Yes, I'll buy it"
-- AI: Asks for purchase information
-- User: "Name: John Doe, Address: 123 Main St, Payment: Credit Card"
-- AI: Returns order number and confirmation
-"""
-
 @app.post("/chat", response_model=ChatResponse)
-def chat(message: ChatMessage, current_user: dict = Depends(get_current_user)):
+async def chat(message: ChatMessage):
     """
-    Unified endpoint to handle all customer messages.
-    This endpoint:
-    1. Receives messages from the browser
-    2. Routes to the correct AI agent based on intent
-    3. Handles product recommendations
-    4. Processes purchase decisions and transactions
-    5. Returns order numbers upon successful purchase
+    Unified endpoint to handle all customer messages by interacting with the LangGraph agent.
+    Supports image uploads via image_url (base64 encoded) in the ChatMessage.
+    For file uploads, use /chat/upload endpoint.
     """
-    user_id = current_user["id"]
-    
-    # Get or create session
     session_id = message.session_id or str(uuid.uuid4())
-    
+    user_message = message.message
+    image_url = message.image_url
+    image_type = message.image_type
+
+    # 1. Get or create the user's session
     if session_id not in sessions:
-        sessions[session_id] = {
-            "context": {},
-            "messages": [],
-            "user_id": user_id,
-            "created_at": datetime.now().isoformat()
-        }
-    
+        sessions[session_id] = {"context": {}, "messages": [], "chat_history": []}
     session = sessions[session_id]
-    
-    # Merge context from message with session context
-    if message.context:
-        session["context"].update(message.context)
-    
+
     # Store user message
-    session["messages"].append({
-        "role": "user",
-        "content": message.message,
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Detect intent using AI agent
-    intent = detect_intent(message.message, session["context"])
-    
-    # Handle different intents
-    if intent == "recommendation":
-        # AI Agent recommends product based on customer preferences
-        response_text, data = generate_response(intent, message.message, session["context"])
-        
-        # Update session context with recommended product
-        session["context"]["recommended_product"] = data.get("product")
-        session["context"]["awaiting_purchase_decision"] = data.get("awaiting_purchase_decision", False)
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="recommendation",
-            session_id=session_id,
-            data=data
-        )
-    
-    elif intent == "purchase_accept":
-        # Customer accepts the recommendation
-        product = session["context"].get("recommended_product")
-        
-        # Pre-fill user info if available
-        user_info = {
-            "name": current_user.get("name"),
-            "address": current_user.get("address")
-        }
-        
-        # Generate response asking for missing info or payment
-        missing_info = []
-        if not user_info.get("name"):
-            missing_info.append("your full name")
-        if not user_info.get("address"):
-            missing_info.append("shipping address")
-        
-        if missing_info:
-            response_text = (
-                f"Excellent! I'll help you complete your purchase of the **{product['name']}**.\n\n"
-                f"I need the following information:\n"
-                f"{chr(10).join([f'{i+1}️⃣ {info}' for i, info in enumerate(missing_info)])}\n"
-                f"{len(missing_info)+1}️⃣ Payment method\n\n"
-                f"You can provide all information in one message."
-            )
-        else:
-            # User info is complete, just ask for payment
-            response_text = (
-                f"Excellent! I'll help you complete your purchase of the **{product['name']}**.\n\n"
-                f"I have your details:\n"
-                f"✓ Name: {user_info['name']}\n"
-                f"✓ Address: {user_info['address']}\n\n"
-                f"Please provide your payment method (e.g., 'Credit Card', 'Debit Card', 'PayPal')"
-            )
-        
-        session["context"]["awaiting_purchase_info"] = True
-        session["context"]["awaiting_purchase_decision"] = False
-        session["context"]["user_info_prefilled"] = user_info
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="purchase_prompt",
-            session_id=session_id,
-            data={"product": product, "user_info": user_info}
-        )
-    
-    elif intent == "product_selection":
-        # Customer is selecting a specific product from multiple recommendations
-        response_text, data = generate_response(intent, message.message, session["context"])
-        
-        # Update session context with selected product
-        session["context"].update(data)
-        if data.get("recommended_product"):
-            session["context"]["recommended_product"] = data["recommended_product"]
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="product_selected",
-            session_id=session_id,
-            data=data
-        )
-    
-    elif intent == "purchase_decline":
-        # Customer declines the recommendation
-        response_text, data = generate_response(intent, message.message, session["context"])
-        
-        # Update session context
-        session["context"].update(data)
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="decline",
-            session_id=session_id,
-            data=data
-        )
-    
-    elif intent == "purchase_info":
-        # Customer provides purchase information (Name, Address, Payment)
-        purchase_info = extract_purchase_info(message.message)
-        product = session["context"].get("recommended_product")
-        
-        if not product:
-            raise HTTPException(status_code=400, detail="No product selected for purchase")
-        
-        # Use pre-filled user info if available
-        prefilled_info = session["context"].get("user_info_prefilled", {})
-        if not purchase_info.get("name") and prefilled_info.get("name"):
-            purchase_info["name"] = prefilled_info["name"]
-        if not purchase_info.get("address") and prefilled_info.get("address"):
-            purchase_info["address"] = prefilled_info["address"]
-        
-        # Validate that we have all required information
-        missing_fields = []
-        if not purchase_info.get("name"):
-            missing_fields.append("name")
-        if not purchase_info.get("address"):
-            missing_fields.append("shipping address")
-        if not purchase_info.get("payment"):
-            missing_fields.append("payment method")
-        
-        if missing_fields:
-            response_text = f"I need some more information. Please provide your {', '.join(missing_fields)}."
-            session["messages"].append({
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": datetime.now().isoformat()
-            })
-            return ChatResponse(
-                message=response_text,
-                intent="purchase_prompt",
-                session_id=session_id,
-                data={"missing_fields": missing_fields}
-            )
-        
-        # Check if payment method is credit/debit card and needs card details
-        payment_lower = purchase_info["payment"].lower()
-        if any(word in payment_lower for word in ["credit", "debit", "card"]) and not session["context"].get("card_details_provided"):
-            # Ask for card details
-            response_text = (
-                f"Great! To complete your purchase with {purchase_info['payment']}, please provide:\n\n"
-                f"🔒 **Secure Payment Information:**\n"
-                f"• Card Number (16 digits)\n"
-                f"• Expiry Date (MM/YY)\n"
-                f"• CVV (3-4 digits)\n"
-                f"• Cardholder Name\n\n"
-                f"Example: 'Card: 1234 5678 9012 3456, Expiry: 12/25, CVV: 123, Name: John Doe'"
-            )
-            
-            # Store purchase info temporarily
-            session["context"]["pending_purchase_info"] = purchase_info
-            session["context"]["awaiting_card_details"] = True
-            session["context"]["awaiting_purchase_info"] = False
-            
-            session["messages"].append({
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": datetime.now().isoformat()
-            })
-            
-            return ChatResponse(
-                message=response_text,
-                intent="awaiting_card_details",
-                session_id=session_id,
-                data={"purchase_info": purchase_info}
-            )
-        
-        # Process the purchase - Generate order number
-        order_id = str(uuid.uuid4())[:8].upper()
-        orders[order_id] = {
-            "product_id": product["id"],
-            "product_name": product["name"],
-            "price": product["price"],
-            "user_id": user_id,
-            "name": purchase_info["name"],
-            "address": purchase_info["address"],
-            "payment": purchase_info["payment"],
-            "order_date": datetime.now().isoformat(),
-            "status": "confirmed"
-        }
-        
-        # Clear session context after successful purchase
+    session["messages"].append({"role": "user", "content": user_message, "timestamp": datetime.now().isoformat()})
+
+    # 2. Run the agent with the current message and session context
+    agent_result = run_agent(user_message, session["context"], session["chat_history"], agent_graph, image_url, image_type)
+
+    # Extract results from the agent's final state
+    response_text = agent_result["response"]
+    new_context_data = agent_result["data"]
+    final_intent = agent_result["intent"]
+
+    # 3. Perform database actions if the agent signals a completed purchase
+    if final_intent == "purchase_complete" and new_context_data.get("purchase_complete"):
+        order_details = new_context_data.get("order_details")
+        if order_details:
+            # For unauthenticated users, we'll use session_id as identifier
+            order_details["session_id"] = session_id
+            orders[order_details["order_id"]] = order_details
+
+    # 4. Update the session context with the data returned by the agent
+    session["context"].update(new_context_data)
+    # If purchase is complete, clear the context for the next interaction
+    if new_context_data.get("purchase_complete"):
         session["context"] = {}
-        
-        # Generate success message
-        response_text = (
-            f"🎉 Purchase successful! Your order has been confirmed.\n\n"
-            f"**Order Number: {order_id}**\n\n"
-            f"Product: {product['name']}\n"
-            f"Price: ${product['price']:.2f}\n"
-            f"Shipping to: {purchase_info['address']}\n\n"
-            f"Thank you for your purchase! Your order will be shipped within 2-3 business days."
-        )
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="purchase_complete",
-            session_id=session_id,
-            data={
-                "order_id": order_id,
-                "product": product,
-                "purchase_info": purchase_info
-            }
-        )
-    
-    elif session["context"].get("awaiting_card_details"):
-        # Customer is providing credit card details
-        product = session["context"].get("recommended_product")
-        purchase_info = session["context"].get("pending_purchase_info", {})
-        
-        if not product or not purchase_info:
-            raise HTTPException(status_code=400, detail="Session data lost. Please start over.")
-        
-        # Extract card details (basic extraction - in production, use secure payment gateway)
-        card_info = {}
-        message_text = message.message.lower()
-        
-        # Check if message contains card-like information
-        if re.search(r'\d{4}', message_text):  # Has some digits
-            card_info["provided"] = True
-        
-        if not card_info.get("provided"):
-            response_text = "Please provide your card details to complete the purchase."
-            session["messages"].append({
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": datetime.now().isoformat()
-            })
-            return ChatResponse(
-                message=response_text,
-                intent="awaiting_card_details",
-                session_id=session_id,
-                data={}
-            )
-        
-        # Process the purchase - Generate order number
-        # NOTE: In production, you would validate card details with a payment gateway here
-        order_id = str(uuid.uuid4())[:8].upper()
-        orders[order_id] = {
-            "product_id": product["id"],
-            "product_name": product["name"],
-            "price": product["price"],
-            "user_id": user_id,
-            "name": purchase_info["name"],
-            "address": purchase_info["address"],
-            "payment": purchase_info["payment"],
-            "payment_details": "Card ending in XXXX (secured)",  # Never store full card details
-            "order_date": datetime.now().isoformat(),
-            "status": "confirmed"
-        }
-        
-        # Clear session context after successful purchase
+
+    # Store assistant message
+    session["messages"].append({"role": "assistant", "content": response_text, "timestamp": datetime.now().isoformat()})
+
+    # Update chat_history with the new exchange
+    session["chat_history"].append({"role": "user", "content": user_message})
+    session["chat_history"].append({"role": "assistant", "content": response_text})
+
+    # 5. Return the agent's response to the user
+    return ChatResponse(
+        message=response_text,
+        intent=final_intent,
+        session_id=session_id,
+        data=new_context_data
+    )
+
+@app.post("/chat/upload", response_model=ChatResponse)
+async def chat_with_upload(
+    message: str = Form(...),
+    session_id: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    image_type: Optional[str] = Form(None)
+):
+    """
+    Endpoint to handle chat messages with file uploads.
+    Supports image uploads for product defects, damaged shipping boxes, and fraudulent transaction OCR.
+    """
+    session_id = session_id or str(uuid.uuid4())
+    user_message = message
+    image_url = None
+
+    # Handle image upload if provided
+    if image:
+        try:
+            # Read image file and convert to base64
+            image_data = await image.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            image_url = f"data:image/{image.content_type.split('/')[-1]};base64,{image_base64}"
+            
+            # Auto-detect image_type if not provided
+            if not image_type:
+                # Infer from message content
+                message_lower = message.lower()
+                if any(keyword in message_lower for keyword in ["defect", "broken", "damaged product", "faulty"]):
+                    image_type = "product_defect"
+                elif any(keyword in message_lower for keyword in ["damaged box", "shipping box", "package box", "delivery box"]):
+                    image_type = "damaged_shipping_box"
+                elif any(keyword in message_lower for keyword in ["fraud", "fraudulent", "unauthorized", "credit card", "transaction"]):
+                    image_type = "fraudulent_transaction_ocr"
+        except Exception as e:
+            print(f"Error processing image: {e}")
+            image_url = None
+
+    # 1. Get or create the user's session
+    if session_id not in sessions:
+        sessions[session_id] = {"context": {}, "messages": [], "chat_history": []}
+    session = sessions[session_id]
+
+    # Store user message
+    session["messages"].append({"role": "user", "content": user_message, "timestamp": datetime.now().isoformat()})
+
+    # 2. Run the agent with the current message and session context
+    agent_result = run_agent(user_message, session["context"], session["chat_history"], agent_graph, image_url, image_type)
+
+    # Extract results from the agent's final state
+    response_text = agent_result["response"]
+    new_context_data = agent_result["data"]
+    final_intent = agent_result["intent"]
+
+    # 3. Perform database actions if the agent signals a completed purchase
+    if final_intent == "purchase_complete" and new_context_data.get("purchase_complete"):
+        order_details = new_context_data.get("order_details")
+        if order_details:
+            # For unauthenticated users, we'll use session_id as identifier
+            order_details["session_id"] = session_id
+            orders[order_details["order_id"]] = order_details
+
+    # 4. Update the session context with the data returned by the agent
+    session["context"].update(new_context_data)
+    # If purchase is complete, clear the context for the next interaction
+    if new_context_data.get("purchase_complete"):
         session["context"] = {}
-        
-        # Generate success message
-        response_text = (
-            f"🎉 Payment processed successfully! Your order has been confirmed.\n\n"
-            f"**Order Number: {order_id}**\n\n"
-            f"Product: {product['name']}\n"
-            f"Price: ${product['price']:.2f}\n"
-            f"Shipping to: {purchase_info['address']}\n"
-            f"Payment: {purchase_info['payment']} (secured)\n\n"
-            f"✅ Your card has been charged ${product['price']:.2f}\n\n"
-            f"Thank you for your purchase! Your order will be shipped within 2-3 business days."
-        )
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="purchase_complete",
-            session_id=session_id,
-            data={
-                "order_id": order_id,
-                "product": product,
-                "purchase_info": purchase_info
-            }
-        )
-    
-    else:  # general intent
-        response_text, data = generate_response(intent, message.message, session["context"])
-        
-        # Store assistant message
-        session["messages"].append({
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return ChatResponse(
-            message=response_text,
-            intent="general",
-            session_id=session_id,
-            data=data
-        )
+
+    # Store assistant message
+    session["messages"].append({"role": "assistant", "content": response_text, "timestamp": datetime.now().isoformat()})
+
+    # Update chat_history with the new exchange
+    session["chat_history"].append({"role": "user", "content": user_message})
+    session["chat_history"].append({"role": "assistant", "content": response_text})
+
+    # 5. Return the agent's response to the user
+    return ChatResponse(
+        message=response_text,
+        intent=final_intent,
+        session_id=session_id,
+        data=new_context_data
+    )
 
 # Get chat session history
 @app.get("/chat/session/{session_id}")
-def get_session(session_id: str, current_user: dict = Depends(get_current_user)):
+def get_session(session_id: str):
     """
     Get the conversation history for a specific session.
     """
@@ -512,14 +260,9 @@ def get_session(session_id: str, current_user: dict = Depends(get_current_user))
     
     session = sessions[session_id]
     
-    # Verify the session belongs to the current user
-    if session["user_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
     return {
         "session_id": session_id,
-        "messages": session["messages"],
-        "created_at": session["created_at"]
+        "messages": session["messages"]
     }
 
 # Product endpoints
@@ -591,54 +334,10 @@ def update_cart_item(product_id: str, quantity: int, current_user: dict = Depend
         return {"message": "Cart updated"}
     raise HTTPException(status_code=404, detail="Item not found in cart")
 
-# ============================================
-# DEPRECATED ENDPOINTS - Use /chat instead
-# ============================================
-# These endpoints are kept for backward compatibility but the /chat endpoint
-# is the preferred way to handle recommendations and purchases
-
-# 1. Get product recommendation (DEPRECATED - Use /chat)
-@app.post("/recommend", response_model=RecommendationResponse, deprecated=True)
-def get_recommendation(request: QueryRequest):
-    """
-    DEPRECATED: Use the /chat endpoint instead for a unified conversational experience.
-    """
-    recommendations = get_product_recommendations(request.query)
-    if not recommendations:
-        raise HTTPException(status_code=404, detail="No recommendation found")
-    return {"recommended_product": recommendations[0]}
-
-# 2. Purchase a product (DEPRECATED - Use /chat)
-@app.post("/purchase", response_model=PurchaseResponse, deprecated=True)
-def purchase_item(request: PurchaseRequest, current_user: dict = Depends(get_current_user)):
-    """
-    DEPRECATED: Use the /chat endpoint instead for a unified conversational experience.
-    """
-    if request.product_id not in products:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    # Generate order ID
-    order_id = str(uuid.uuid4())[:8]
-    orders[order_id] = {
-        "product_id": request.product_id,
-        "user_id": current_user["id"],
-        "name": request.name,
-        "address": request.shipping_address,
-        "payment": request.payment_method,
-    }
-
-    # Clear the item from cart if it exists
-    user_id = current_user["id"]
-    if user_id in carts and request.product_id in carts[user_id]:
-        del carts[user_id][request.product_id]
-
-    return {"order_id": order_id, "status": "success"}
-
 # Checkout entire cart
 @app.post("/checkout", response_model=PurchaseResponse)
 def checkout_cart(
-    shipping_address: str,
-    payment_method: str,
+    request: CheckoutRequest,
     current_user: dict = Depends(get_current_user)
 ):
     user_id = current_user["id"]
@@ -653,11 +352,15 @@ def checkout_cart(
         "user_id": user_id,
         "items": user_cart.copy(),
         "name": current_user["name"],
-        "address": shipping_address,
-        "payment": payment_method,
+        "address": request.shipping_address,
+        "payment": request.payment_method,
     }
     
     # Clear the cart
     carts[user_id] = {}
     
     return {"order_id": order_id, "status": "success"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

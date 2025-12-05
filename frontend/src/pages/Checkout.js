@@ -43,6 +43,14 @@ const Checkout = () => {
     setLoading(true);
 
     try {
+      // Ensure the server has the latest cart (backend is in-memory; it can reset)
+      const serverCart = await axios.get('http://localhost:8000/cart');
+      if (!serverCart.data?.items || serverCart.data.items.length === 0) {
+        toast.error('Your server cart is empty. Please re-add items.');
+        navigate('/cart');
+        return;
+      }
+
       const response = await axios.post('http://localhost:8000/checkout', {
         shipping_address: formData.shippingAddress || user?.address || '',
         payment_method: formData.paymentMethod,

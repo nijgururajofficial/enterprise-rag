@@ -13,6 +13,10 @@ body {
   background-color: #f8fafc;
   color: #1e293b;
   line-height: 1.6;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  overflow-x: hidden;
 }
 
 code {
@@ -20,9 +24,17 @@ code {
     monospace;
 }
 
+/* App Layout */
+.App {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
 /* Global Styles */
 .container {
-  max-width: 1200px;
+  width: 100%;
   margin: 0 auto;
   padding: 0 1rem;
 }
@@ -183,6 +195,23 @@ code {
   100% { transform: rotate(360deg); }
 }
 
+/* Main Content Layout for Sidebar */
+.main-content {
+  min-height: calc(100vh - 80px);
+  transition: margin-right 0.3s ease;
+  width: 100%;
+}
+
+.main-content.sidebar-open {
+  margin-right: 400px;
+  width: calc(100% - 400px);
+}
+
+.main-content.sidebar-closed {
+  margin-right: 0;
+  width: 100%;
+}
+
 /* Toast Notifications */
 .Toastify__toast {
   border-radius: 0.5rem;
@@ -199,4 +228,22 @@ code {
 
 .Toastify__toast--info {
   background-color: #3b82f6;
+}
+
+/* Responsive adjustments for sidebar */
+@media (max-width: 768px) {
+  .main-content {
+    margin-right: 0 !important;
+    width: 100% !important;
+  }
+  
+  .container {
+    padding: 0 0.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .container {
+    padding: 0 0.25rem;
+  }
 }

@@ -4,6 +4,7 @@
   position: sticky;
   top: 0;
   z-index: 1000;
+  width: 100%;
 }
 
 .navbar-content {
@@ -13,6 +14,7 @@
   padding: 1rem 0;
   flex-wrap: wrap;
   gap: 1rem;
+  width: 100%;
 }
 
 .navbar-logo {

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FiMessageCircle, FiX, FiSend, FiShoppingCart } from 'react-icons/fi';
 import axios from 'axios';
-import { useAuth } from '../context/AuthContext';
+import { useSidebar } from '../App';
 import './Chatbot.css';
 
 const API_URL = 'http://localhost:8000';
@@ -10,7 +10,6 @@ const CATEGORY_SHORTCUTS = [
   { key: 'phones', label: 'Phones', prompt: 'Show me the latest phones' },
   { key: 'laptops', label: 'Laptops', prompt: 'Recommend laptops for work' },
   { key: 'monitors', label: 'Monitors', prompt: 'Find monitors around $500' },
-  { key: 'accessories', label: 'Accessories', prompt: 'Suggest useful accessories' }
 ];
 
 const CATEGORY_LABELS = CATEGORY_SHORTCUTS.reduce((acc, item) => {
@@ -18,9 +17,8 @@ const CATEGORY_LABELS = CATEGORY_SHORTCUTS.reduce((acc, item) => {
   return acc;
 }, {});
 
-const Chatbot = () => {
-  const { token, isAuthenticated } = useAuth();
-  const [isOpen, setIsOpen] = useState(false);
+const Chatbot = ({ onRecommendations }) => {
+  const { isSidebarOpen, setIsSidebarOpen } = useSidebar();
   const [messages, setMessages] = useState([
     {
       id: 1,
@@ -47,6 +45,23 @@ const Chatbot = () => {
     scrollToBottom();
   }, [messages]);
 
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage(e);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setInputMessage(e.target.value);
+    
+    // Auto-resize textarea
+    const textarea = e.target;
+    textarea.style.height = 'auto';
+    const newHeight = Math.min(textarea.scrollHeight, 120);
+    textarea.style.height = newHeight + 'px';
+  };
+
   const handleSendMessage = async (e, overrideMessage) => {
     if (e?.preventDefault) {
       e.preventDefault();
@@ -54,19 +69,6 @@ const Chatbot = () => {
 
     const messageText = (overrideMessage ?? inputMessage).trim();
     if (!messageText) return;
-
-    // Check if user is authenticated
-    if (!isAuthenticated) {
-      const botMessage = {
-        id: `auth-${Date.now()}`,
-        text: "⚠️ Please log in to use the shopping assistant. You can log in from the navigation menu.",
-        sender: 'bot',
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, botMessage]);
-      setInputMessage('');
-      return;
-    }
 
     const userMessage = {
       id: `user-${Date.now()}`,
@@ -78,6 +80,12 @@ const Chatbot = () => {
     setMessages(prev => [...prev, userMessage]);
     setInputMessage('');
     setIsTyping(true);
+    
+    // Reset textarea height
+    const textarea = document.querySelector('.chatbot-input');
+    if (textarea) {
+      textarea.style.height = 'auto';
+    }
 
     try {
       // Call the unified /chat endpoint
@@ -86,11 +94,6 @@ const Chatbot = () => {
         {
           message: messageText,
           session_id: sessionId
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
         }
       );
 
@@ -108,8 +111,22 @@ const Chatbot = () => {
           counts[normalized] = (counts[normalized] || 0) + 1;
         });
         setCategoryStats(counts);
+        
+        // Update the main page with recommended products
+        if (onRecommendations) {
+          onRecommendations(data.data.recommendations);
+        }
+      } else if (data.data?.product) {
+        // Handle single product recommendation
+        if (onRecommendations) {
+          onRecommendations([data.data.product]);
+        }
       } else {
         setCategoryStats({});
+        // Clear recommendations if no products are returned
+        if (onRecommendations) {
+          onRecommendations([]);
+        }
       }
 
       // Create bot response with product info if available
@@ -129,9 +146,7 @@ const Chatbot = () => {
       
       let errorMessage = "Sorry, I encountered an error. Please try again.";
       
-      if (error.response?.status === 401) {
-        errorMessage = "⚠️ Your session has expired. Please log in again.";
-      } else if (error.response?.data?.detail) {
+      if (error.response?.data?.detail) {
         errorMessage = `Error: ${error.response.data.detail}`;
       }
 
@@ -204,21 +219,18 @@ const Chatbot = () => {
   };
 
   return (
-    <div className="chatbot-container">
-      {/* Chat Toggle Button */}
+    <>
+      {/* Toggle Button */}
       <button 
-        className={`chatbot-toggle ${isOpen ? 'open' : ''}`}
-        onClick={() => setIsOpen(!isOpen)}
-        aria-label="Toggle chat"
+        className={`chatbot-toggle ${isSidebarOpen ? 'open' : ''}`}
+        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+        aria-label="Toggle chat sidebar"
       >
-        {isOpen ? <FiX size={24} /> : <FiMessageCircle size={24} />}
-        {!isAuthenticated && (
-          <span className="auth-badge">Login Required</span>
-        )}
+        {isSidebarOpen ? <FiX size={24} /> : <FiMessageCircle size={24} />}
       </button>
 
-      {/* Chat Window */}
-      {isOpen && (
+      {/* Sidebar */}
+      <div className={`chatbot-container ${isSidebarOpen ? 'open' : 'closed'}`}>
         <div className="chatbot-window">
           <div className="chatbot-category-strip">
             {CATEGORY_SHORTCUTS.map((item) => (
@@ -241,13 +253,13 @@ const Chatbot = () => {
               <div>
                 <h3>🤖 AI Shopping Assistant</h3>
                 <span className="status-indicator">
-                  {isAuthenticated ? '✓ Authenticated' : '⚠️ Login Required'}
+                  ✓ Ready to help
                 </span>
               </div>
             </div>
             <button 
               className="close-btn"
-              onClick={() => setIsOpen(false)}
+              onClick={() => setIsSidebarOpen(false)}
               aria-label="Close chat"
             >
               <FiX size={20} />
@@ -278,26 +290,26 @@ const Chatbot = () => {
           </div>
 
           <form className="chatbot-input-container" onSubmit={handleSendMessage}>
-            <input
-              type="text"
-              placeholder={isAuthenticated ? "Type your message..." : "Please login to chat..."}
+            <textarea
+              placeholder="Type your message... (Shift+Enter for new line)"
               value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
+              onChange={handleInputChange}
+              onKeyPress={handleKeyPress}
               className="chatbot-input"
-              disabled={!isAuthenticated}
+              rows="1"
             />
             <button 
               type="submit"
               className="send-btn"
-              disabled={!inputMessage.trim() || !isAuthenticated}
+              disabled={!inputMessage.trim()}
               aria-label="Send message"
             >
               <FiSend size={18} />
             </button>
           </form>
         </div>
-      )}
-    </div>
+      </div>
+    </>
   );
 };
 
